@@ -1,0 +1,24 @@
+{
+  "name": "ticker-cms",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Next-generation Ticker Content Management SaaS",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*",
+    "infrastructure"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @ticker-cms/api & npm run dev -w @ticker-cms/web",
+    "dev:api": "npm run dev -w @ticker-cms/api",
+    "dev:web": "npm run dev -w @ticker-cms/web",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  }
+}

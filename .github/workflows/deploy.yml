@@ -1,0 +1,37 @@
+name: Deploy AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: aws-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      CDK_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: CDK bootstrap and deploy
+        working-directory: infrastructure
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "Using account $ACCOUNT in $AWS_REGION"
+          npx cdk bootstrap "aws://$ACCOUNT/$AWS_REGION"
+          CDK_DEFAULT_ACCOUNT="$ACCOUNT" npx cdk deploy --all --require-approval never

@@ -1,0 +1,14 @@
+node_modules
+dist
+build
+.turbo
+.env
+.env.local
+.data
+*.log
+coverage
+.DS_Store
+*.tsbuildinfo
+cdk.out
+cdk.out-js
+.vscode
