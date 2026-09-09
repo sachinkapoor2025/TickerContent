@@ -1,27 +1,173 @@
-import { StrictMode, useEffect, useRef } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { createDemoDocument, renderFrame } from "@ticker-cms/composition";
+import { renderFrame, type CompositionDocument, type RenderResources } from "@ticker-cms/composition";
+import { AssetMediaSession } from "../../web/src/media/assetClient";
+import { createLottieRenderer } from "../../web/src/media/lottieRenderer";
+import { loadReferencedMedia } from "./loadMedia";
+import {
+  PLAYBACK_POLL_MS,
+  errorView,
+  fetchPlayback,
+  interpretPlayback,
+  playbackIdentity,
+  readStoredToken,
+  readTickerId,
+  type PlaybackResponse,
+  type PlayerView,
+} from "./playback";
+import "./styles.css";
 
-function Player() {
+function PlayerCanvas({ document, resources }: { document: CompositionDocument; resources: RenderResources }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const resourcesRef = useRef(resources);
+  resourcesRef.current = resources;
+
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
-    const doc = createDemoDocument({ width: 993, height: 32, colorMode: "full" }, "Ticker CMS player  •  offline cache ready");
-    canvas.width = doc.profile.width;
-    canvas.height = doc.profile.height;
+    canvas.width = document.profile.width;
+    canvas.height = document.profile.height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const start = performance.now();
     let raf = 0;
-    const loop = (t: number) => {
-      renderFrame(doc, ctx, t - start);
+    const loop = (now: number) => {
+      renderFrame(document, ctx, now - start, resourcesRef.current);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
-  return <canvas ref={ref} style={{ width: "100%", imageRendering: "pixelated" }} />;
+  }, [document]);
+
+  return (
+    <canvas
+      ref={ref}
+      className="player-canvas"
+      width={document.profile.width}
+      height={document.profile.height}
+    />
+  );
+}
+
+function Message({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="player-shell">
+      <p className="player-message">
+        <strong>{title}</strong>
+        {body}
+      </p>
+    </div>
+  );
+}
+
+function Player() {
+  const tickerId = readTickerId(window.location.search);
+  const session = useMemo(
+    () =>
+      new AssetMediaSession({
+        fetch: globalThis.fetch.bind(globalThis),
+        getToken: () => readStoredToken(window.localStorage),
+      }),
+    [],
+  );
+  const [view, setView] = useState<PlayerView>(() => {
+    if (!tickerId) return { kind: "need_ticker" };
+    if (!readStoredToken(window.localStorage)) return { kind: "need_auth" };
+    return { kind: "loading" };
+  });
+  const [resources, setResources] = useState<RenderResources>({});
+  const identityRef = useRef("");
+
+  useEffect(() => {
+    if (!tickerId) return;
+    let cancelled = false;
+
+    const load = async () => {
+      const token = readStoredToken(window.localStorage);
+      if (!token) {
+        setView({ kind: "need_auth" });
+        return;
+      }
+      try {
+        const { status, body } = await fetchPlayback(tickerId, { fetch: globalThis.fetch.bind(globalThis), token });
+        if (cancelled) return;
+        if (status !== 200) {
+          const message = "error" in body ? body.error?.message : undefined;
+          setView(errorView(status, message));
+          setResources({});
+          identityRef.current = "";
+          return;
+        }
+        const playback = body as PlaybackResponse;
+        const nextIdentity = playbackIdentity(playback);
+        if (nextIdentity === identityRef.current) return;
+        const next = interpretPlayback(playback);
+        if (next.kind !== "ready") {
+          identityRef.current = nextIdentity;
+          setResources({});
+          setView(next);
+          return;
+        }
+        const media = await loadReferencedMedia(next.document, session);
+        if (cancelled) return;
+        identityRef.current = nextIdentity;
+        setResources({
+          images: media.images,
+          renderLottie: createLottieRenderer(media.lottie),
+        });
+        setView(next);
+      } catch {
+        if (!cancelled) {
+          setView({ kind: "error", message: "Unable to reach the playback API." });
+          setResources({});
+          identityRef.current = "";
+        }
+      }
+    };
+
+    void load();
+    const timer = window.setInterval(() => void load(), PLAYBACK_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [session, tickerId]);
+
+  if (view.kind === "need_ticker") {
+    return (
+      <Message
+        title="Ticker required"
+        body="Open this player with ?tickerId=<ticker-id>. A ticker is not selected automatically."
+      />
+    );
+  }
+  if (view.kind === "need_auth") {
+    return (
+      <Message
+        title="Sign in required"
+        body="Sign in to the tenant app, then set ticker_cms_token in this origin’s local storage. The player does not use another user’s session."
+      />
+    );
+  }
+  if (view.kind === "loading") {
+    return <Message title="Loading" body="Loading published playback…" />;
+  }
+  if (view.kind === "error") {
+    return <Message title="Playback unavailable" body={view.message} />;
+  }
+  if (view.kind === "empty") {
+    return (
+      <Message
+        title="No published content"
+        body={`${view.ticker.width}×${view.ticker.height} · ${view.ticker.colorMode}`}
+      />
+    );
+  }
+  return (
+    <div className="player-shell">
+      <PlayerCanvas document={view.document} resources={resources} />
+    </div>
+  );
 }
 
 createRoot(document.getElementById("root")!).render(

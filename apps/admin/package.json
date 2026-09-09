@@ -8,9 +8,10 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "echo \"no admin unit tests\""
+    "test": "vitest run"
   },
   "dependencies": {
+    "@ticker-cms/ui": "*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -19,6 +20,7 @@
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.8.2",
-    "vite": "^6.2.2"
+    "vite": "^6.2.2",
+    "vitest": "^3.0.8"
   }
 }
