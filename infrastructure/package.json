@@ -9,7 +9,8 @@
     "deploy": "cdk deploy --all --require-approval never",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "echo \"no infra unit tests\""
+    "test": "node --require ts-node/register --test test/api-stack.test.ts test/frontend-stack.test.ts test/app.test.ts test/presentation-smoke.test.ts",
+    "smoke": "node --require ts-node/register scripts/presentation-smoke.ts"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.187.0",

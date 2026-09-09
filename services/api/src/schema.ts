@@ -59,6 +59,7 @@ export const tickers = sqliteTable("tickers", {
   location: text("location"),
   width: integer("width").notNull(),
   height: integer("height").notNull(),
+  colorMode: text("color_mode").notNull().default("full"),
   orientation: text("orientation").notNull().default("landscape"),
   status: text("status").notNull().default("active"),
   lastHeartbeatAt: integer("last_heartbeat_at", { mode: "timestamp_ms" }),
@@ -119,6 +120,7 @@ export const campaigns = sqliteTable("campaigns", {
   startAt: integer("start_at", { mode: "timestamp_ms" }).notNull(),
   endAt: integer("end_at", { mode: "timestamp_ms" }).notNull(),
   contentId: text("content_id").notNull(),
+  publishedVersionId: text("published_version_id"),
   targetTickerIdsJson: text("target_ticker_ids_json").notNull().default("[]"),
   recurrence: text("recurrence"),
 });
@@ -176,5 +178,9 @@ export const assets = sqliteTable("assets", {
   kind: text("kind").notNull(),
   name: text("name").notNull(),
   status: text("status").notNull().default("ready"),
+  storageKey: text("storage_key"),
+  mimeType: text("mime_type"),
+  sizeBytes: integer("size_bytes"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }),
   metaJson: text("meta_json").notNull().default("{}"),
 });

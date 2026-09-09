@@ -1,13 +1,15 @@
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import { cors } from "hono/cors";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { z } from "zod";
-import { createDemoDocument, type CompositionDocument } from "@ticker-cms/composition";
+import { COLOR_MODES, createDemoDocument, type ColorMode, type CompositionDocument } from "@ticker-cms/composition";
 import type { EntitlementKey, SubscriptionStatus } from "@ticker-cms/entitlements";
 import { db } from "./db.js";
 import { hashPassword, id, signToken, slugify, verifyPassword, verifyToken } from "./crypto.js";
 import { snapshotForOrg } from "./entitlements.js";
+import { classifyAsset, extensionForMime } from "./asset-classify.js";
+import { MAX_ASSET_BYTES, assetStorage, writeAssetObject } from "./asset-storage.js";
 import {
   aiConversations,
   animationPacks,
@@ -21,6 +23,7 @@ import {
   entitlementOverrides,
   memberships,
   organizations,
+  plans,
   playlists,
   publishingJobs,
   subscriptions,
@@ -65,8 +68,42 @@ function audit(input: {
     .run();
 }
 
-function jsonError(c: Context, status: 400 | 401 | 403 | 404 | 409 | 429, code: string, message: string) {
+function jsonError(c: Context, status: 400 | 401 | 403 | 404 | 409 | 413 | 429, code: string, message: string) {
   return c.json({ error: { code, message } }, status);
+}
+
+function versionIdFromSnapshot(snapshotJson: string): string | null {
+  try {
+    const parsed = JSON.parse(snapshotJson) as { version?: unknown };
+    return typeof parsed.version === "string" ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+const colorModeSchema = z.enum(COLOR_MODES);
+const tickerCreateSchema = z.object({
+  name: z.string().min(1),
+  location: z.string().optional(),
+  width: z.number().int().positive().default(993),
+  height: z.number().int().positive().default(32),
+  colorMode: colorModeSchema.default("full"),
+});
+const tickerPatchSchema = z.object({
+  name: z.string().min(1).optional(),
+  location: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  colorMode: colorModeSchema.optional(),
+});
+
+function parseTickerBody<S extends z.ZodTypeAny>(c: Context, schema: S, data: unknown): z.output<S> | Response {
+  const parsed = schema.safeParse(data);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return jsonError(c, 400, "invalid_body", issue?.message ?? "Invalid request body.");
+  }
+  return parsed.data;
 }
 
 const PERMISSIONS: Record<string, string[]> = {
@@ -234,7 +271,9 @@ export function createApp() {
   });
 
   const requireOrg = async (c: Context<AppEnv>, next: Next) => {
-    if (c.get("audience") === "platform") return next();
+    if (c.get("audience") === "platform") {
+      return jsonError(c, 403, "forbidden", "Platform administration must use /v1/admin routes.");
+    }
     if (!c.get("orgId")) return jsonError(c, 400, "no_organization", "Select an organization.");
     const org = db.select().from(organizations).where(eq(organizations.id, c.get("orgId"))).get();
     if (!org || org.status === "closed") return jsonError(c, 403, "org_unavailable", "Organization unavailable.");
@@ -260,10 +299,13 @@ export function createApp() {
 
   app.use("/v1/tickers/*", requireOrg);
   app.use("/v1/tickers", requireOrg);
+  app.use("/v1/playback/*", requireOrg);
   app.use("/v1/contents/*", requireOrg);
   app.use("/v1/contents", requireOrg);
   app.use("/v1/campaigns/*", requireOrg);
   app.use("/v1/campaigns", requireOrg);
+  app.use("/v1/assets/*", requireOrg);
+  app.use("/v1/assets", requireOrg);
 
   app.get("/v1/dashboard", async (c) => {
     const orgId = c.get("orgId");
@@ -302,18 +344,12 @@ export function createApp() {
     if (!can(c.get("roleKey"), "tickers.write") && !can(c.get("roleKey"), "tickers.*")) {
       return jsonError(c, 403, "forbidden", "Not allowed.");
     }
+    const body = parseTickerBody(c, tickerCreateSchema, await c.req.json());
+    if (body instanceof Response) return body;
     const ents = await snapshotForOrg(c.get("orgId"));
     if ((ents.remaining.devices ?? 0) <= 0 || !ents.flags["devices.max"]) {
       return jsonError(c, 403, "entitlement_exceeded", "Device limit reached or subscription restricted.");
     }
-    const body = z
-      .object({
-        name: z.string().min(1),
-        location: z.string().optional(),
-        width: z.number().int().positive().default(993),
-        height: z.number().int().positive().default(32),
-      })
-      .parse(await c.req.json());
     const row = {
       id: id("tkr"),
       organizationId: c.get("orgId"),
@@ -321,6 +357,7 @@ export function createApp() {
       location: body.location ?? null,
       width: body.width,
       height: body.height,
+      colorMode: body.colorMode as ColorMode,
       orientation: "landscape" as const,
       status: "active",
       lastHeartbeatAt: null,
@@ -342,6 +379,41 @@ export function createApp() {
     const row = scopedTicker(c.get("orgId"), c.req.param("id"));
     if (!row) return jsonError(c, 404, "not_found", "Ticker not found.");
     return c.json({ ...serializeTicker(row), nowPlaying: resolveNowPlaying(c.get("orgId"), row.id) });
+  });
+
+  app.get("/v1/playback/tickers/:tickerId", (c) => {
+    const row = scopedTicker(c.get("orgId"), c.req.param("tickerId"));
+    if (!row) return jsonError(c, 404, "not_found", "Ticker not found.");
+    return c.json(serializePlayback(row, resolveNowPlaying(c.get("orgId"), row.id)));
+  });
+
+  app.patch("/v1/tickers/:id", async (c) => {
+    if (!can(c.get("roleKey"), "tickers.write") && !can(c.get("roleKey"), "tickers.*")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
+    const row = scopedTicker(c.get("orgId"), c.req.param("id"));
+    if (!row) return jsonError(c, 404, "not_found", "Ticker not found.");
+    const body = parseTickerBody(c, tickerPatchSchema, await c.req.json());
+    if (body instanceof Response) return body;
+    db.update(tickers)
+      .set({
+        name: body.name ?? row.name,
+        location: body.location ?? row.location,
+        width: body.width ?? row.width,
+        height: body.height ?? row.height,
+        colorMode: (body.colorMode ?? row.colorMode) as ColorMode,
+      })
+      .where(eq(tickers.id, row.id))
+      .run();
+    audit({
+      organizationId: c.get("orgId"),
+      actorUserId: c.get("userId"),
+      action: "ticker.updated",
+      resourceType: "ticker",
+      resourceId: row.id,
+    });
+    const updated = scopedTicker(c.get("orgId"), row.id);
+    return c.json(serializeTicker(updated!));
   });
 
   app.post("/v1/tickers/:id/heartbeat", (c) => {
@@ -443,6 +515,9 @@ export function createApp() {
   });
 
   app.patch("/v1/contents/:id", async (c) => {
+    if (!can(c.get("roleKey"), "content.write") && !can(c.get("roleKey"), "content.*")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
     const item = scopedContent(c.get("orgId"), c.req.param("id"));
     if (!item) return jsonError(c, 404, "not_found", "Content not found.");
     const body = z
@@ -472,6 +547,9 @@ export function createApp() {
   });
 
   app.post("/v1/contents/:id/publish", async (c) => {
+    if (!can(c.get("roleKey"), "publish")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
     const ents = await snapshotForOrg(c.get("orgId"));
     if (!ents.flags["content.publish"]) {
       return jsonError(c, 403, "subscription_inactive", "Publishing is blocked until the subscription is active.");
@@ -480,6 +558,19 @@ export function createApp() {
     if (!item?.headDraftVersionId) return jsonError(c, 404, "not_found", "Content not found.");
     const draft = db.select().from(contentVersions).where(eq(contentVersions.id, item.headDraftVersionId)).get();
     if (!draft) return jsonError(c, 404, "not_found", "Draft missing.");
+    let tickerIds: string[] = [];
+    try {
+      const raw = await c.req.json();
+      const parsed = z.object({ tickerIds: z.array(z.string()).optional() }).safeParse(raw ?? {});
+      if (!parsed.success) {
+        return jsonError(c, 400, "invalid_body", parsed.error.issues[0]?.message ?? "Invalid request body.");
+      }
+      tickerIds = parsed.data.tickerIds ?? [];
+    } catch {
+      tickerIds = [];
+    }
+    const targets = orgTickersOrError(c.get("orgId"), tickerIds);
+    if ("error" in targets) return jsonError(c, 400, "invalid_ticker", targets.error);
     db.update(contents)
       .set({ publishedVersionId: draft.id, status: "published" })
       .where(eq(contents.id, item.id))
@@ -502,15 +593,15 @@ export function createApp() {
         createdAt: new Date(),
       })
       .run();
-    const orgTickers = db.select().from(tickers).where(eq(tickers.organizationId, c.get("orgId"))).all();
-    for (const ticker of orgTickers) {
+    for (const tickerId of targets.ids) {
+      const ticker = scopedTicker(c.get("orgId"), tickerId);
       db.insert(deviceDeliveries)
         .values({
           id: id("dlv"),
           organizationId: c.get("orgId"),
           jobId,
-          tickerId: ticker.id,
-          status: ticker.lastHeartbeatAt ? "acked" : "pending",
+          tickerId,
+          status: ticker?.lastHeartbeatAt ? "acked" : "pending",
           snapshotVersion: draft.id,
         })
         .run();
@@ -523,7 +614,7 @@ export function createApp() {
       resourceId: item.id,
       source: c.req.header("x-source") === "ai" ? "ai" : "human",
     });
-    return c.json({ jobId, snapshot, deliveries: orgTickers.length });
+    return c.json({ jobId, snapshot, deliveries: targets.ids.length });
   });
 
   app.post("/v1/contents/:id/rollback", async (c) => {
@@ -578,48 +669,162 @@ export function createApp() {
   });
 
   app.get("/v1/assets", (c) => {
+    if (!can(c.get("roleKey"), "content.read") && !can(c.get("roleKey"), "content.*") && !can(c.get("roleKey"), "assets.read")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
     const orgId = c.get("orgId");
     const items = db
       .select()
       .from(assets)
+      .where(or(eq(assets.organizationId, orgId), isNull(assets.organizationId)))
       .all()
-      .filter((a) => a.organizationId === null || a.organizationId === orgId);
+      .map(serializeAsset);
     return c.json({ items });
   });
 
+  app.post("/v1/assets", async (c) => {
+    if (!can(c.get("roleKey"), "content.write") && !can(c.get("roleKey"), "content.*") && !can(c.get("roleKey"), "assets.write")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
+    const form = await c.req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) {
+      return jsonError(c, 400, "invalid_body", "A file is required.");
+    }
+    const nameField = form.get("name");
+    const name = (typeof nameField === "string" && nameField.trim() ? nameField.trim() : file.name) || "asset";
+    if (file.size > MAX_ASSET_BYTES) {
+      return jsonError(c, 413, "file_too_large", `File exceeds the ${MAX_ASSET_BYTES} byte limit.`);
+    }
+    const bytes = Buffer.from(await file.arrayBuffer());
+    if (bytes.length > MAX_ASSET_BYTES) {
+      return jsonError(c, 413, "file_too_large", `File exceeds the ${MAX_ASSET_BYTES} byte limit.`);
+    }
+    const classified = classifyAsset(bytes, file.type, file.name);
+    if ("error" in classified) {
+      return jsonError(c, 400, "invalid_asset", classified.error);
+    }
+    const assetId = id("ast");
+    const storageKey = `${assetId}.${extensionForMime(classified.mimeType)}`;
+    const storageContext = { organizationId: c.get("orgId") };
+    const now = new Date();
+    await writeAssetObject(assetStorage, storageKey, bytes, storageContext, () => {
+      db.insert(assets)
+        .values({
+          id: assetId,
+          organizationId: c.get("orgId"),
+          kind: classified.kind,
+          name,
+          status: "ready",
+          storageKey,
+          mimeType: classified.mimeType,
+          sizeBytes: bytes.length,
+          createdAt: now,
+          metaJson: "{}",
+        })
+        .run();
+    });
+    audit({
+      organizationId: c.get("orgId"),
+      actorUserId: c.get("userId"),
+      action: "asset.uploaded",
+      resourceType: "asset",
+      resourceId: assetId,
+    });
+    const row = db.select().from(assets).where(eq(assets.id, assetId)).get();
+    return c.json(serializeAsset(row!), 201);
+  });
+
+  app.get("/v1/assets/:id/content", async (c) => {
+    if (!can(c.get("roleKey"), "content.read") && !can(c.get("roleKey"), "content.*") && !can(c.get("roleKey"), "assets.read")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
+    const row = scopedAsset(c.get("orgId"), c.req.param("id"));
+    if (!row?.storageKey) return jsonError(c, 404, "not_found", "Asset not found.");
+    const bytes = await assetStorage.read(row.storageKey, { organizationId: row.organizationId });
+    if (!bytes) return jsonError(c, 404, "not_found", "Asset file is missing.");
+    return new Response(new Uint8Array(bytes), {
+      status: 200,
+      headers: {
+        "content-type": row.mimeType ?? "application/octet-stream",
+        "content-length": String(bytes.length),
+      },
+    });
+  });
+
+  app.delete("/v1/assets/:id", async (c) => {
+    if (!can(c.get("roleKey"), "content.write") && !can(c.get("roleKey"), "content.*") && !can(c.get("roleKey"), "assets.write")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
+    const row = scopedAsset(c.get("orgId"), c.req.param("id"));
+    if (!row || row.organizationId !== c.get("orgId")) {
+      return jsonError(c, 404, "not_found", "Asset not found.");
+    }
+    if (row.storageKey) await assetStorage.delete(row.storageKey, { organizationId: row.organizationId });
+    db.delete(assets).where(eq(assets.id, row.id)).run();
+    audit({
+      organizationId: c.get("orgId"),
+      actorUserId: c.get("userId"),
+      action: "asset.deleted",
+      resourceType: "asset",
+      resourceId: row.id,
+    });
+    return c.json({ ok: true });
+  });
+
   app.get("/v1/campaigns", (c) => {
-    return c.json({ items: db.select().from(campaigns).where(eq(campaigns.organizationId, c.get("orgId"))).all() });
+    const items = db
+      .select()
+      .from(campaigns)
+      .where(eq(campaigns.organizationId, c.get("orgId")))
+      .all()
+      .map(serializeCampaign);
+    return c.json({ items });
   });
 
   app.post("/v1/campaigns", async (c) => {
+    if (!can(c.get("roleKey"), "campaigns.write") && !can(c.get("roleKey"), "campaigns.*")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
     const ents = await snapshotForOrg(c.get("orgId"));
     if (!ents.flags["scheduling.advanced"] && !ents.flags["content.publish"]) {
       return jsonError(c, 403, "entitlement_denied", "Scheduling is not available on this plan.");
     }
     const body = z
       .object({
-        name: z.string(),
+        name: z.string().min(1),
         contentId: z.string(),
         startAt: z.string(),
         endAt: z.string(),
         priority: z.number().int().default(100),
         targetTickerIds: z.array(z.string()).default([]),
+        status: z.enum(CAMPAIGN_STATUSES).optional(),
         recurrence: z.string().optional(),
       })
       .parse(await c.req.json());
-    if (!scopedContent(c.get("orgId"), body.contentId)) {
+    const content = scopedContent(c.get("orgId"), body.contentId);
+    if (!content) {
       return jsonError(c, 400, "invalid_content", "Content must belong to this organization.");
     }
+    const dates = campaignDatesOrError(body.startAt, body.endAt);
+    if ("error" in dates) return jsonError(c, 400, "invalid_dates", dates.error);
+    const targets = orgTickersOrError(c.get("orgId"), body.targetTickerIds);
+    if ("error" in targets) return jsonError(c, 400, "invalid_ticker", targets.error);
+    const publishedVersionId = content.publishedVersionId ?? null;
+    const status = body.status ?? (publishedVersionId && targets.ids.length ? "scheduled" : "draft");
+    const playableError = playableCampaignError(status, targets.ids, publishedVersionId);
+    if (playableError) return jsonError(c, 400, "campaign_not_playable", playableError);
     const row = {
       id: id("cmp"),
       organizationId: c.get("orgId"),
       name: body.name,
-      status: "scheduled",
+      status,
       priority: body.priority,
-      startAt: new Date(body.startAt),
-      endAt: new Date(body.endAt),
+      startAt: dates.start,
+      endAt: dates.end,
       contentId: body.contentId,
-      targetTickerIdsJson: JSON.stringify(body.targetTickerIds),
+      publishedVersionId: publishedVersionId,
+      targetTickerIdsJson: JSON.stringify(targets.ids),
       recurrence: body.recurrence ?? null,
     };
     db.insert(campaigns).values(row).run();
@@ -630,21 +835,61 @@ export function createApp() {
       resourceType: "campaign",
       resourceId: row.id,
     });
-    return c.json(row, 201);
+    return c.json(serializeCampaign({ ...row, targetTickerIdsJson: row.targetTickerIdsJson }), 201);
   });
 
   app.patch("/v1/campaigns/:id", async (c) => {
+    if (!can(c.get("roleKey"), "campaigns.write") && !can(c.get("roleKey"), "campaigns.*")) {
+      return jsonError(c, 403, "forbidden", "Not allowed.");
+    }
     const row = db
       .select()
       .from(campaigns)
       .where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.organizationId, c.get("orgId"))))
       .get();
     if (!row) return jsonError(c, 404, "not_found", "Campaign not found.");
-    const body = z.object({ status: z.enum(["draft", "scheduled", "running", "paused", "cancelled", "ended"]) }).parse(
-      await c.req.json(),
+    const body = z
+      .object({
+        name: z.string().min(1).optional(),
+        contentId: z.string().optional(),
+        startAt: z.string().optional(),
+        endAt: z.string().optional(),
+        targetTickerIds: z.array(z.string()).optional(),
+        status: z.enum(CAMPAIGN_STATUSES).optional(),
+      })
+      .parse(await c.req.json());
+    const content = scopedContent(c.get("orgId"), body.contentId ?? row.contentId);
+    if (!content) {
+      return jsonError(c, 400, "invalid_content", "Content must belong to this organization.");
+    }
+    const dates = campaignDatesOrError(
+      body.startAt ?? row.startAt.toISOString(),
+      body.endAt ?? row.endAt.toISOString(),
     );
-    db.update(campaigns).set({ status: body.status }).where(eq(campaigns.id, row.id)).run();
-    return c.json({ ok: true, status: body.status });
+    if ("error" in dates) return jsonError(c, 400, "invalid_dates", dates.error);
+    const targets = orgTickersOrError(
+      c.get("orgId"),
+      body.targetTickerIds ?? parseCampaignTargets(row.targetTickerIdsJson),
+    );
+    if ("error" in targets) return jsonError(c, 400, "invalid_ticker", targets.error);
+    const publishedVersionId = content.publishedVersionId ?? row.publishedVersionId ?? null;
+    const status = body.status ?? row.status;
+    const playableError = playableCampaignError(status, targets.ids, publishedVersionId);
+    if (playableError) return jsonError(c, 400, "campaign_not_playable", playableError);
+    db.update(campaigns)
+      .set({
+        name: body.name ?? row.name,
+        contentId: content.id,
+        startAt: dates.start,
+        endAt: dates.end,
+        targetTickerIdsJson: JSON.stringify(targets.ids),
+        status,
+        publishedVersionId: PLAYABLE_CAMPAIGN_STATUSES.has(status) ? publishedVersionId : row.publishedVersionId,
+      })
+      .where(eq(campaigns.id, row.id))
+      .run();
+    const updated = db.select().from(campaigns).where(eq(campaigns.id, row.id)).get();
+    return c.json(serializeCampaign(updated!));
   });
 
   app.get("/v1/playlists", (c) => {
@@ -808,17 +1053,157 @@ export function createApp() {
     return c.json({ items });
   });
 
+  app.get("/v1/admin/organizations/:id", async (c) => {
+    if (c.get("audience") !== "platform") return jsonError(c, 403, "forbidden", "Platform only.");
+    const org = db.select().from(organizations).where(eq(organizations.id, c.req.param("id"))).get();
+    if (!org) return jsonError(c, 404, "not_found", "Organization not found.");
+    const sub = db.select().from(subscriptions).where(eq(subscriptions.organizationId, org.id)).get();
+    const plan = sub ? db.select().from(plans).where(eq(plans.id, sub.planId)).get() : undefined;
+    const memberCount = db.select().from(memberships).where(eq(memberships.organizationId, org.id)).all().length;
+    const tickerCount = db.select().from(tickers).where(eq(tickers.organizationId, org.id)).all().length;
+    const entitlements = await snapshotForOrg(org.id);
+    return c.json({
+      organization: {
+        id: org.id,
+        name: org.name,
+        slug: org.slug,
+        status: org.status,
+        timezone: org.timezone,
+        createdAt: org.createdAt,
+      },
+      subscription: sub
+        ? {
+            status: sub.status,
+            planId: sub.planId,
+            currentPeriodEnd: sub.currentPeriodEnd,
+            graceEndsAt: sub.graceEndsAt,
+            provider: sub.provider,
+          }
+        : null,
+      plan: plan ? { id: plan.id, name: plan.name, code: plan.code } : null,
+      entitlements,
+      memberCount,
+      tickerCount,
+    });
+  });
+
+  app.get("/v1/admin/organizations/:id/memberships", (c) => {
+    if (c.get("audience") !== "platform") return jsonError(c, 403, "forbidden", "Platform only.");
+    const org = db.select().from(organizations).where(eq(organizations.id, c.req.param("id"))).get();
+    if (!org) return jsonError(c, 404, "not_found", "Organization not found.");
+    const items = db
+      .select()
+      .from(memberships)
+      .where(eq(memberships.organizationId, org.id))
+      .all()
+      .map((membership) => {
+        const user = db.select().from(users).where(eq(users.id, membership.userId)).get();
+        return {
+          id: membership.id,
+          userId: membership.userId,
+          email: user?.email ?? null,
+          name: user?.name ?? null,
+          roleKey: membership.roleKey,
+          status: membership.status,
+        };
+      });
+    return c.json({ items });
+  });
+
+  app.get("/v1/admin/organizations/:id/audit-logs", (c) => {
+    if (c.get("audience") !== "platform") return jsonError(c, 403, "forbidden", "Platform only.");
+    const org = db.select().from(organizations).where(eq(organizations.id, c.req.param("id"))).get();
+    if (!org) return jsonError(c, 404, "not_found", "Organization not found.");
+    const items = db
+      .select()
+      .from(auditLogs)
+      .where(eq(auditLogs.organizationId, org.id))
+      .orderBy(desc(auditLogs.createdAt))
+      .all()
+      .slice(0, 100)
+      .map((row) => ({
+        id: row.id,
+        organizationId: row.organizationId,
+        actorUserId: row.actorUserId,
+        action: row.action,
+        resourceType: row.resourceType,
+        resourceId: row.resourceId,
+        source: row.source,
+        payloadJson: row.payloadJson,
+        createdAt: row.createdAt,
+      }));
+    return c.json({ items });
+  });
+
+  app.get("/v1/admin/organizations/:id/publishing-jobs", (c) => {
+    if (c.get("audience") !== "platform") return jsonError(c, 403, "forbidden", "Platform only.");
+    const org = db.select().from(organizations).where(eq(organizations.id, c.req.param("id"))).get();
+    if (!org) return jsonError(c, 404, "not_found", "Organization not found.");
+    const items = db
+      .select()
+      .from(publishingJobs)
+      .where(eq(publishingJobs.organizationId, org.id))
+      .orderBy(desc(publishingJobs.createdAt))
+      .all()
+      .slice(0, 100)
+      .map((row) => ({
+        id: row.id,
+        contentId: row.contentId,
+        versionId: versionIdFromSnapshot(row.snapshotJson),
+        status: row.status,
+        trigger: row.trigger,
+        createdAt: row.createdAt,
+      }));
+    return c.json({ items });
+  });
+
+  app.get("/v1/admin/organizations/:id/deliveries", (c) => {
+    if (c.get("audience") !== "platform") return jsonError(c, 403, "forbidden", "Platform only.");
+    const org = db.select().from(organizations).where(eq(organizations.id, c.req.param("id"))).get();
+    if (!org) return jsonError(c, 404, "not_found", "Organization not found.");
+    const jobCreatedAt = new Map(
+      db
+        .select()
+        .from(publishingJobs)
+        .where(eq(publishingJobs.organizationId, org.id))
+        .all()
+        .map((job) => [job.id, job.createdAt?.getTime?.() ?? 0]),
+    );
+    const items = db
+      .select()
+      .from(deviceDeliveries)
+      .where(eq(deviceDeliveries.organizationId, org.id))
+      .all()
+      .sort((a, b) => (jobCreatedAt.get(b.jobId) ?? 0) - (jobCreatedAt.get(a.jobId) ?? 0))
+      .slice(0, 100)
+      .map((row) => ({
+        id: row.id,
+        tickerId: row.tickerId,
+        jobId: row.jobId,
+        snapshotVersion: row.snapshotVersion,
+        status: row.status,
+      }));
+    return c.json({ items });
+  });
+
   app.post("/v1/admin/organizations/:id/status", async (c) => {
     if (c.get("audience") !== "platform") return jsonError(c, 403, "forbidden", "Platform only.");
-    const body = z.object({ status: z.enum(["active", "suspended", "closed"]) }).parse(await c.req.json());
-    db.update(organizations).set({ status: body.status }).where(eq(organizations.id, c.req.param("id"))).run();
+    const parsed = z.object({ status: z.enum(["active", "suspended", "closed"]) }).safeParse(await c.req.json());
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return jsonError(c, 400, "invalid_body", issue?.message ?? "Invalid request body.");
+    }
+    const orgId = c.req.param("id");
+    const org = db.select().from(organizations).where(eq(organizations.id, orgId)).get();
+    if (!org) return jsonError(c, 404, "not_found", "Organization not found.");
+    db.update(organizations).set({ status: parsed.data.status }).where(eq(organizations.id, org.id)).run();
     audit({
-      organizationId: c.req.param("id"),
+      organizationId: org.id,
       actorUserId: c.get("userId"),
       action: "organization.status",
       resourceType: "organization",
-      resourceId: c.req.param("id"),
-      payload: body,
+      resourceId: org.id,
+      payload: parsed.data,
     });
     return c.json({ ok: true });
   });
@@ -838,6 +1223,14 @@ export function createApp() {
         expiresAt: new Date(Date.now() + 7 * 86400000),
       })
       .run();
+    audit({
+      organizationId: c.req.param("id"),
+      actorUserId: c.get("userId"),
+      action: "organization.override",
+      resourceType: "organization",
+      resourceId: c.req.param("id"),
+      payload: { key: body.key, enabled: body.enabled, reason: body.reason },
+    });
     return c.json({ ok: true });
   });
 
@@ -860,6 +1253,82 @@ function scopedContent(orgId: string, contentId: string) {
     .get();
 }
 
+const CAMPAIGN_STATUSES = ["draft", "scheduled", "running", "paused", "cancelled", "ended"] as const;
+const PLAYABLE_CAMPAIGN_STATUSES = new Set(["scheduled", "running"]);
+
+function parseCampaignTargets(json: string): string[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function serializeCampaign(row: typeof campaigns.$inferSelect) {
+  return {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    priority: row.priority,
+    startAt: row.startAt,
+    endAt: row.endAt,
+    contentId: row.contentId,
+    publishedVersionId: row.publishedVersionId,
+    targetTickerIds: parseCampaignTargets(row.targetTickerIdsJson),
+    recurrence: row.recurrence,
+  };
+}
+
+function orgTickersOrError(orgId: string, ids: string[]): { ids: string[] } | { error: string } {
+  const unique = [...new Set(ids.filter(Boolean))];
+  for (const tickerId of unique) {
+    if (!scopedTicker(orgId, tickerId)) {
+      return { error: "Every target ticker must belong to this organization." };
+    }
+  }
+  return { ids: unique };
+}
+
+function campaignDatesOrError(startAt: string, endAt: string): { start: Date; end: Date } | { error: string } {
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return { error: "Start and end must be valid dates." };
+  }
+  if (start.getTime() >= end.getTime()) {
+    return { error: "Start must be before end." };
+  }
+  return { start, end };
+}
+
+function playableCampaignError(status: string, targetTickerIds: string[], publishedVersionId: string | null): string | null {
+  if (!PLAYABLE_CAMPAIGN_STATUSES.has(status)) return null;
+  if (targetTickerIds.length < 1) return "At least one ticker is required for a scheduled campaign.";
+  if (!publishedVersionId) return "Content must have a published version before the campaign can be scheduled.";
+  return null;
+}
+
+function scopedAsset(orgId: string, assetId: string) {
+  const row = db.select().from(assets).where(eq(assets.id, assetId)).get();
+  if (!row) return null;
+  if (row.organizationId === null || row.organizationId === orgId) return row;
+  return null;
+}
+
+function serializeAsset(row: typeof assets.$inferSelect) {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    name: row.name,
+    kind: row.kind,
+    mimeType: row.mimeType,
+    sizeBytes: row.sizeBytes,
+    status: row.status,
+    createdAt: row.createdAt,
+  };
+}
+
 function serializeTicker(row: typeof tickers.$inferSelect) {
   const now = Date.now();
   const online = Boolean(row.lastHeartbeatAt && now - row.lastHeartbeatAt.getTime() < 90_000);
@@ -874,45 +1343,42 @@ export function resolveNowPlaying(orgId: string, tickerId?: string) {
     .where(eq(campaigns.organizationId, orgId))
     .all()
     .filter((cmp) => {
-      if (!["scheduled", "running"].includes(cmp.status)) return false;
+      if (!PLAYABLE_CAMPAIGN_STATUSES.has(cmp.status)) return false;
       if (cmp.startAt.getTime() > now || cmp.endAt.getTime() < now) return false;
-      const targets = JSON.parse(cmp.targetTickerIdsJson) as string[];
-      if (tickerId && targets.length && !targets.includes(tickerId)) return false;
+      const targets = parseCampaignTargets(cmp.targetTickerIdsJson);
+      if (!tickerId || targets.length === 0 || !targets.includes(tickerId)) return false;
       return true;
     })
-    .sort((a, b) => b.priority - a.priority);
-  const winner = activeCampaigns[0];
-  if (winner) {
+    .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id));
+  for (const winner of activeCampaigns) {
     const content = scopedContent(orgId, winner.contentId);
-    const version = content?.publishedVersionId
-      ? db.select().from(contentVersions).where(eq(contentVersions.id, content.publishedVersionId)).get()
-      : content?.headDraftVersionId
-        ? db.select().from(contentVersions).where(eq(contentVersions.id, content.headDraftVersionId)).get()
-        : null;
+    const versionId = content?.publishedVersionId ?? null;
+    if (!content || !versionId) continue;
+    const version = db
+      .select()
+      .from(contentVersions)
+      .where(
+        and(
+          eq(contentVersions.id, versionId),
+          eq(contentVersions.organizationId, orgId),
+          eq(contentVersions.contentId, content.id),
+        ),
+      )
+      .get();
+    if (!version) continue;
     return {
       source: "campaign" as const,
       campaignId: winner.id,
       campaignName: winner.name,
       priority: winner.priority,
       contentId: winner.contentId,
-      document: version ? (JSON.parse(version.documentJson) as CompositionDocument) : null,
+      publishedVersionId: version.id,
+      document: JSON.parse(version.documentJson) as CompositionDocument,
     };
   }
-  const published = db
-    .select()
-    .from(contents)
-    .where(and(eq(contents.organizationId, orgId), eq(contents.status, "published")))
-    .all()[0];
-  if (published?.publishedVersionId) {
-    const version = db.select().from(contentVersions).where(eq(contentVersions.id, published.publishedVersionId)).get();
-    return {
-      source: "published" as const,
-      campaignId: null,
-      campaignName: null,
-      priority: 0,
-      contentId: published.id,
-      document: version ? (JSON.parse(version.documentJson) as CompositionDocument) : null,
-    };
+  if (tickerId) {
+    const published = resolveTickerPublished(orgId, tickerId);
+    if (published) return published;
   }
   return {
     source: "empty" as const,
@@ -920,7 +1386,63 @@ export function resolveNowPlaying(orgId: string, tickerId?: string) {
     campaignName: null,
     priority: 0,
     contentId: null,
-    document: createDemoDocument({ width: 993, height: 32, colorMode: "full" }, "No published content yet"),
+    publishedVersionId: null,
+    document: null,
+  };
+}
+
+function resolveTickerPublished(orgId: string, tickerId: string) {
+  const deliveries = db
+    .select()
+    .from(deviceDeliveries)
+    .where(and(eq(deviceDeliveries.organizationId, orgId), eq(deviceDeliveries.tickerId, tickerId)))
+    .all();
+  let latest: { snapshotVersion: string; createdAt: number; id: string } | null = null;
+  for (const delivery of deliveries) {
+    const job = db
+      .select()
+      .from(publishingJobs)
+      .where(and(eq(publishingJobs.id, delivery.jobId), eq(publishingJobs.organizationId, orgId)))
+      .get();
+    const createdAt = job?.createdAt?.getTime() ?? 0;
+    if (!latest || createdAt > latest.createdAt || (createdAt === latest.createdAt && delivery.id > latest.id)) {
+      latest = { snapshotVersion: delivery.snapshotVersion, createdAt, id: delivery.id };
+    }
+  }
+  if (!latest) return null;
+  const version = db
+    .select()
+    .from(contentVersions)
+    .where(and(eq(contentVersions.id, latest.snapshotVersion), eq(contentVersions.organizationId, orgId)))
+    .get();
+  if (!version) return null;
+  const content = scopedContent(orgId, version.contentId);
+  if (!content) return null;
+  return {
+    source: "published" as const,
+    campaignId: null,
+    campaignName: null,
+    priority: 0,
+    contentId: content.id,
+    publishedVersionId: version.id,
+    document: JSON.parse(version.documentJson) as CompositionDocument,
+  };
+}
+
+function serializePlayback(ticker: typeof tickers.$inferSelect, playing: ReturnType<typeof resolveNowPlaying>) {
+  return {
+    ticker: {
+      id: ticker.id,
+      width: ticker.width,
+      height: ticker.height,
+      colorMode: ticker.colorMode,
+    },
+    source: playing.source,
+    contentId: playing.contentId,
+    versionId: playing.publishedVersionId,
+    campaignId: playing.campaignId,
+    campaignName: playing.campaignName,
+    document: playing.document,
   };
 }
 
