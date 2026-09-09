@@ -7,6 +7,7 @@ on:
         description: Type deploy to run the presentation CDK deployment
         required: true
         default: ""
+  workflow_call:
 
 concurrency:
   group: aws-deploy
@@ -14,7 +15,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event.inputs.confirm == 'deploy'
+    if: github.event_name == 'workflow_call' || inputs.confirm == 'deploy'
     runs-on: ubuntu-latest
     permissions:
       contents: read
