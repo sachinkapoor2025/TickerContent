@@ -1,5 +1,5 @@
 #!/usr/bin/env npx ts-node
-import { checkHealth, checkLoginReturnsJson } from "../lib/presentation-smoke";
+import { checkHealth, checkLoginReturnsJson, checkPlayerSurface } from "../lib/presentation-smoke";
 
 type Args = {
   albUrl?: string;
@@ -53,6 +53,9 @@ async function main(): Promise<void> {
     await retry("Customer CloudFront GET /health", args.attempts, args.delayMs, () => checkHealth(args.webUrl!));
     await retry("Customer CloudFront POST /v1/auth/login JSON", args.attempts, args.delayMs, () =>
       checkLoginReturnsJson(args.webUrl!),
+    );
+    await retry("Customer CloudFront GET /player/", args.attempts, args.delayMs, () =>
+      checkPlayerSurface(args.webUrl!),
     );
   }
   if (args.adminUrl) {

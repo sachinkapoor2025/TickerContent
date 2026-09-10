@@ -63,3 +63,61 @@ export async function checkLoginReturnsJson(baseUrl: string, fetchImpl: FetchLik
   );
   parseApiJson(body, contentType);
 }
+
+const PLAYER_TITLE = "<title>Ticker Player</title>";
+const CUSTOMER_SPA_TITLE = "<title>Photonplay</title>";
+
+export function assertPlayerHtml(body: string, contentType: string | null): string[] {
+  if (!looksLikeHtml(body, contentType)) {
+    throw new Error("Player response was not HTML");
+  }
+  if (body.includes(CUSTOMER_SPA_TITLE)) {
+    throw new Error("Player route returned the Customer SPA");
+  }
+  if (!body.includes(PLAYER_TITLE)) {
+    throw new Error("Player HTML is missing the Ticker Player title");
+  }
+  const assets = [...body.matchAll(/(?:src|href)="(\/player\/assets\/[^"]+\.(?:js|css))"/g)].flatMap((match) =>
+    match[1] ? [match[1]] : [],
+  );
+  if (assets.length === 0) {
+    throw new Error("Player HTML has no /player/assets JS or CSS");
+  }
+  return [...new Set(assets)];
+}
+
+export async function checkPlayerHtml(baseUrl: string, fetchImpl: FetchLike = fetch): Promise<string[]> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/player/`;
+  const { status, contentType, body } = await readResponse(url, { method: "GET" }, fetchImpl);
+  if (status !== 200) {
+    throw new Error(`${url} returned HTTP ${status}`);
+  }
+  return assertPlayerHtml(body, contentType);
+}
+
+export async function checkPlayerAsset(
+  baseUrl: string,
+  assetPath: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<void> {
+  if (!assetPath.startsWith("/player/assets/")) {
+    throw new Error("Refusing to fetch a path outside /player/assets/");
+  }
+  const url = `${baseUrl.replace(/\/+$/, "")}${assetPath}`;
+  const { status, contentType, body } = await readResponse(url, { method: "GET" }, fetchImpl);
+  if (status !== 200) {
+    throw new Error(`${url} returned HTTP ${status}`);
+  }
+  if (looksLikeHtml(body, contentType)) {
+    throw new Error("Player static asset was HTML instead of JS/CSS");
+  }
+}
+
+export async function checkPlayerSurface(baseUrl: string, fetchImpl: FetchLike = fetch): Promise<void> {
+  const assets = await checkPlayerHtml(baseUrl, fetchImpl);
+  const assetPath = assets[0];
+  if (!assetPath) {
+    throw new Error("Player HTML has no /player/assets JS or CSS");
+  }
+  await checkPlayerAsset(baseUrl, assetPath, fetchImpl);
+}

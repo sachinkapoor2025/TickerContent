@@ -98,6 +98,7 @@ describe("playback documents", () => {
 
 describe("player architecture", () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "main.tsx"), "utf8");
+  const vite = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../vite.config.ts"), "utf8");
 
   it("does not call createDemoDocument", () => {
     expect(src).not.toContain("createDemoDocument");
@@ -106,6 +107,11 @@ describe("player architecture", () => {
   it("uses shared renderFrame", () => {
     expect(src).toContain("renderFrame");
     expect(src).toContain('@ticker-cms/composition');
+  });
+
+  it("builds static assets under /player/ and still requests origin-root /v1 playback", () => {
+    expect(vite).toContain('command === "build" ? "/player/" : "/"');
+    expect(playbackRequestPath("tkr_1")).toBe("/v1/playback/tickers/tkr_1");
   });
 
   it("loads assetId references through the existing asset system", () => {

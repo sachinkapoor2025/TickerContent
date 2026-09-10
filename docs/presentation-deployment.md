@@ -27,12 +27,17 @@ This is a public URL, not a secret. After the first successful deploy you may st
 | Surface | Stack | Origin |
 | --- | --- | --- |
 | Customer SPA | `TickerCmsFrontend` | private S3 + CloudFront |
+| Player | `TickerCmsFrontend` | same Customer S3 bucket under `/player/` |
 | Admin SPA | `TickerCmsFrontend` | private S3 + CloudFront |
 | API | `TickerCmsApi` | ECS Fargate (1 task) behind an ALB; SQLite on EFS; private S3 assets |
 
-CloudFront routes `/v1/*` and `/health` to the API ALB. All other paths stay on the SPA S3 origins.
+CloudFront routes `/v1/*` and `/health` to the API ALB. All other paths stay on the Customer/Admin S3 origins.
 
-Player is **not** deployed by this pipeline.
+Player (`apps/player`) is deployed into the **Customer** S3 bucket under the `/player/` prefix on the same CloudFront origin:
+
+`https://<customer-cloudfront-domain>/player/?tickerId=<tickerId>`
+
+`/player` and `/player/` rewrite to `/player/index.html`. They must not fall through to the Customer SPA. `/v1/*` and `/health` stay on the API ALB. Player API calls remain same-origin (`GET /v1/playback/tickers/:tickerId`) and still require the existing tenant session token.
 
 ## WEB_ORIGIN (two-phase)
 
@@ -84,6 +89,8 @@ Unauthenticated checks only. No demo passwords are used.
 - ALB: `GET /health` → JSON `{ "ok": true, "service": "ticker-cms-api" }`
 - Customer CloudFront: `GET /health` → same JSON
 - Customer CloudFront: `POST /v1/auth/login` with a fake email → JSON error, **not** `index.html`
+- Customer CloudFront: `GET /player/` → Player HTML (`Ticker Player`), **not** the Customer SPA
+- Customer CloudFront: Player JS/CSS under `/player/assets/` is reachable and is not HTML
 - Admin CloudFront: `GET /health` → same JSON
 
 HTTP 200 HTML is treated as failure.

@@ -108,6 +108,29 @@ test("Customer and Admin CloudFront both route /v1/* and /health to the same ALB
   assert.equal(albDomainNames.size, 1, "Customer and Admin API origins must be the same ALB");
 });
 
+test("Customer CloudFront rewrites /player to player index.html and does not treat it as the tenant SPA", () => {
+  const app = new cdk.App();
+  const apiStack = new cdk.Stack(app, "ApiStub");
+  const vpc = new ec2.Vpc(apiStack, "Vpc", { maxAzs: 2, natGateways: 0 });
+  const alb = new elbv2.ApplicationLoadBalancer(apiStack, "Alb", { vpc, internetFacing: true });
+  const stack = new TickerCmsFrontendStack(app, "Frontend", {
+    apiLoadBalancer: alb,
+    skipAssetDeployment: true,
+  });
+  const template = Template.fromStack(stack);
+  const functions = template.findResources("AWS::CloudFront::Function");
+  const codes = Object.values(functions).map((resource) => String(resource.Properties.FunctionCode ?? ""));
+  const customer = codes.find((code) => code.includes("request.uri = '/player/index.html'"));
+  const admin = codes.find(
+    (code) => code.includes("request.uri = '/index.html'") && !code.includes("/player/index.html"),
+  );
+  assert.ok(customer, "Customer viewer-request function rewrites /player to /player/index.html");
+  assert.ok(customer.includes("uri === '/player'") || customer.includes('uri === "/player"'));
+  assert.ok(customer.includes("/player/"));
+  assert.ok(admin, "Admin viewer-request function still rewrites only to /index.html");
+  template.resourceCountIs("AWS::CloudFront::Function", 2);
+});
+
 test("frontend stack still uses private S3 buckets and a single ALB origin pair", () => {
   const app = new cdk.App();
   const apiStack = new cdk.Stack(app, "ApiStub");

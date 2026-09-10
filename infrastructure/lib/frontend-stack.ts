@@ -46,8 +46,26 @@ export class TickerCmsFrontendStack extends cdk.Stack {
 
     // Distribution-level 403/404 → /index.html would also rewrite API errors.
     // SPA deep links stay on the S3 default behavior via this viewer-request rewrite.
+    // Customer must not rewrite /player/ to the tenant SPA; hashed Player assets keep their extension.
+    const customerSpaFallbackFn = new cloudfront.Function(this, "CustomerSpaFallbackFn", {
+      comment: "Rewrite /player to player index.html; other extensionless Customer routes to /index.html",
+      code: cloudfront.FunctionCode.fromInline(`function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+  if (uri.indexOf('.') !== -1) {
+    return request;
+  }
+  if (uri === '/player' || uri.indexOf('/player/') === 0) {
+    request.uri = '/player/index.html';
+    return request;
+  }
+  request.uri = '/index.html';
+  return request;
+}
+`),
+    });
     const spaFallbackFn = new cloudfront.Function(this, "SpaFallbackFn", {
-      comment: "Rewrite extensionless Customer/Admin routes to /index.html; API behaviors do not use this function",
+      comment: "Rewrite extensionless Admin routes to /index.html; API behaviors do not use this function",
       code: cloudfront.FunctionCode.fromInline(`function handler(event) {
   var request = event.request;
   var uri = request.uri;
@@ -60,6 +78,10 @@ export class TickerCmsFrontendStack extends cdk.Stack {
 `),
     });
 
+    const customerSpaFunctionAssociation: cloudfront.FunctionAssociation = {
+      function: customerSpaFallbackFn,
+      eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+    };
     const spaFunctionAssociation: cloudfront.FunctionAssociation = {
       function: spaFallbackFn,
       eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
@@ -80,7 +102,7 @@ export class TickerCmsFrontendStack extends cdk.Stack {
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(webBucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        functionAssociations: [spaFunctionAssociation],
+        functionAssociations: [customerSpaFunctionAssociation],
       },
       additionalBehaviors: {
         "/v1/*": apiBehavior,
@@ -103,12 +125,22 @@ export class TickerCmsFrontendStack extends cdk.Stack {
     if (!props.skipAssetDeployment) {
       const webDir = path.join(__dirname, "../../apps/web/dist");
       const adminDir = path.join(__dirname, "../../apps/admin/dist");
+      const playerDir = path.join(__dirname, "../../apps/player/dist");
 
-      new s3deploy.BucketDeployment(this, "DeployWeb", {
+      const deployWeb = new s3deploy.BucketDeployment(this, "DeployWeb", {
         destinationBucket: webBucket,
         distribution: this.webDistribution,
         sources: [s3deploy.Source.asset(webDir)],
       });
+      // Player is uploaded after Customer SPA so DeployWeb prune cannot leave /player/ missing.
+      const deployPlayer = new s3deploy.BucketDeployment(this, "DeployPlayer", {
+        destinationBucket: webBucket,
+        destinationKeyPrefix: "player",
+        distribution: this.webDistribution,
+        distributionPaths: ["/player/*"],
+        sources: [s3deploy.Source.asset(playerDir)],
+      });
+      deployPlayer.node.addDependency(deployWeb);
       new s3deploy.BucketDeployment(this, "DeployAdmin", {
         destinationBucket: adminBucket,
         distribution: this.adminDistribution,
