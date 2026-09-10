@@ -11,6 +11,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.758.0",
     "@hono/node-server": "^1.14.1",
     "@ticker-cms/composition": "*",
     "@ticker-cms/entitlements": "*",

@@ -1,682 +1,1184 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import type { CompositionDocument } from "@ticker-cms/composition";
-import { api, setToken, token } from "./api";
-import { LedPreview } from "./LedPreview";
+﻿import { useEffect, useState } from "react";
+import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { AppShell, AuthLayout, UnavailablePanel, type ShellLinkProps } from "@ticker-cms/ui";
+import { api, ApiError, clearCustomerSession, onSessionInvalidated, setToken, token } from "./api";
+import { TickerDisplay } from "./components/TickerDisplay";
+import { asCompositionDocument } from "./components/ledPresentation";
+import { Tickers } from "./Tickers";
+import { TickerDesignPage } from "./TickerDesignPage";
+import { TickerDetail } from "./TickerDetail";
+import { AssetDetail } from "./AssetDetail";
+import { AssetLibrary } from "./AssetLibrary";
+import { AnimationLibrary } from "./AnimationLibrary";
+import { TemplateLibrary } from "./TemplateLibrary";
+import {
+  CUSTOMER_REGISTER_FIELDS,
+  PLATFORM_WORKSPACE_MESSAGE,
+  SESSION_EXPIRED_MESSAGE,
+  UNABLE_TO_REGISTER_MESSAGE,
+  buildCustomerRegisterPayload,
+  customerSignInError,
+  evaluateLoginToken,
+  evaluateTenantMe,
+  initialSessionStatus,
+  type CustomerMe,
+} from "./session";
+import {
+  NOW_PLAYING_EMPTY,
+  NOW_PLAYING_LOADING_MESSAGE,
+  NOW_PLAYING_PLAYBACK_ERROR,
+  NOW_PLAYING_SELECT_LABEL,
+  dashboardPageState,
+  dashboardTickerOptions,
+  nowPlayingPlaybackPath,
+  nowPlayingStorageKey,
+  readPersistedNowPlayingTickerId,
+  resolveNowPlayingTickerId,
+  writePersistedNowPlayingTickerId,
+  type DashboardResponse,
+  type DashboardTicker,
+} from "./dashboardData";
+import { ASSISTANT_DEFAULT_OPEN, CUSTOMER_NAV, customerHeader, customerLegacyRedirect, navItemCurrent } from "./shellNav";
+import { CustomerRoleProvider, useCustomerAccess } from "./CustomerRole";
+import { ASSISTANT_SEND_ERROR, assistantSubmitState } from "./assistantChat";
+import {
+  USERS_EMPTY_DESCRIPTION,
+  USERS_EMPTY_TITLE,
+  USERS_PAGE_DESCRIPTION,
+  USER_INVITE_ERROR,
+  USER_INVITE_SUCCESS,
+  userInviteLabel,
+  usersPageState,
+  validateUserInvite,
+  workspaceRoleLabel,
+  CUSTOMER_INVITE_ROLES,
+  type MembershipRecord,
+} from "./userData";
+import {
+  SIMULATED_STATUSES,
+  SUBSCRIPTION_PAGE_DESCRIPTION,
+  SUBSCRIPTION_SIMULATE_ERROR,
+  SUBSCRIPTION_SIMULATION_NOTE,
+  subscriptionPageState,
+  type SubscriptionResponse,
+} from "./subscriptionData";
+import {
+  AUDIT_EMPTY_DESCRIPTION,
+  AUDIT_EMPTY_TITLE,
+  AUDIT_PAGE_DESCRIPTION,
+  auditPageState,
+  type AuditRecord,
+} from "./auditData";
+import {
+  TICKERS_EMPTY_DESCRIPTION,
+  type TickerPlayback,
+} from "./tickerData";
+import { StimulatePage } from "./stimulate/StimulatePage";
+import { TickerDesignerDemoPage } from "./tickerDesignerDemo/TickerDesignerDemoPage";
 
-type Me = {
-  user: { id: string; email: string; name: string; audience: string };
-  organization: { id: string; name: string; status: string } | null;
-  roleKey: string;
-};
+type Me = CustomerMe;
 
-function useMe() {
+type SessionStatus = "checking" | "unauthenticated" | "authenticated" | "error";
+
+function useCustomerSession() {
+  const [status, setStatus] = useState<SessionStatus>(() => initialSessionStatus(Boolean(token())));
   const [me, setMe] = useState<Me | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+
+  function becomeUnauthenticated(message?: string) {
+    clearCustomerSession();
+    setMe(null);
+    setStatus("unauthenticated");
+    setSessionError(null);
+    setAuthMessage(message ?? null);
+  }
+
+  async function verifySession() {
+    if (!token()) {
+      setStatus("unauthenticated");
+      setMe(null);
+      return;
+    }
+    setStatus("checking");
+    setSessionError(null);
+    try {
+      const data = await api<Me>("/v1/me");
+      const decision = evaluateTenantMe(data);
+      if (!decision.ok) {
+        becomeUnauthenticated(decision.message);
+        return;
+      }
+      setMe(decision.me);
+      setAuthMessage(null);
+      setStatus("authenticated");
+    } catch (err) {
+      const error = err as { status?: number };
+      if (error.status === 401 || !token()) {
+        becomeUnauthenticated(SESSION_EXPIRED_MESSAGE);
+        return;
+      }
+      setMe(null);
+      setSessionError("Unable to verify your session. Please try again.");
+      setStatus("error");
+    }
+  }
+
   useEffect(() => {
-    if (!token()) return;
-    api<Me>("/v1/me")
-      .then(setMe)
-      .catch((e) => setErr(e.message));
+    void verifySession();
   }, []);
-  return { me, err, setMe };
+
+  useEffect(() => {
+    return onSessionInvalidated(() => {
+      becomeUnauthenticated(SESSION_EXPIRED_MESSAGE);
+    });
+  }, []);
+
+  return {
+    status,
+    me,
+    authMessage,
+    sessionError,
+    becomeUnauthenticated,
+    accept: (next: Me) => {
+      setMe(next);
+      setAuthMessage(null);
+      setSessionError(null);
+      setStatus("authenticated");
+    },
+    retry: () => {
+      void verifySession();
+    },
+  };
 }
 
 export default function App() {
+  const { pathname } = useLocation();
+  if (pathname === "/stimulate") {
+    return <StimulatePage />;
+  }
+  if (pathname === "/ticker-designer-demo") {
+    return <TickerDesignerDemoPage />;
+  }
+  return <CustomerPortal />;
+}
+
+function CustomerPortal() {
+  const session = useCustomerSession();
+  if (session.status === "checking") {
+    return (
+      <AuthLayout productLabel="Photonplay" title="Checking your session…">
+        <p className="muted">Please wait.</p>
+      </AuthLayout>
+    );
+  }
+  if (session.status === "error") {
+    return (
+      <AuthLayout productLabel="Photonplay" title="Unable to continue">
+        <p className="error" role="alert">
+          {session.sessionError}
+        </p>
+        <div className="row" style={{ marginTop: 16 }}>
+          <button className="btn" type="button" onClick={session.retry}>
+            Try again
+          </button>
+          <button className="btn ghost" type="button" onClick={() => session.becomeUnauthenticated()}>
+            Sign in
+          </button>
+        </div>
+      </AuthLayout>
+    );
+  }
   return (
     <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
-      <Route path="/*" element={<Authed />} />
+      <Route
+        path="/login"
+        element={<Login authenticated={session.status === "authenticated"} authMessage={session.authMessage} onAuthenticated={session.accept} />}
+      />
+      <Route
+        path="/register"
+        element={<Register authenticated={session.status === "authenticated"} onAuthenticated={session.accept} />}
+      />
+      <Route path="/*" element={session.status === "authenticated" && session.me ? <Authed me={session.me} /> : <Navigate to="/login" replace />} />
     </Routes>
   );
 }
 
-function Authed() {
-  if (!token()) return <Navigate to="/login" replace />;
+function CustomerLink({ to, end, className, children, title, onClick, "aria-label": ariaLabel }: ShellLinkProps) {
   return (
-    <div className="shell">
-      <nav className="side">
-        <div className="brand">TICKER CMS</div>
-        <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>Dashboard</NavLink>
-        <NavLink to="/tickers" className={({ isActive }) => (isActive ? "active" : "")}>Tickers</NavLink>
-        <NavLink to="/content" className={({ isActive }) => (isActive ? "active" : "")}>Content</NavLink>
-        <NavLink to="/templates" className={({ isActive }) => (isActive ? "active" : "")}>Templates</NavLink>
-        <NavLink to="/animations" className={({ isActive }) => (isActive ? "active" : "")}>Animations</NavLink>
-        <NavLink to="/campaigns" className={({ isActive }) => (isActive ? "active" : "")}>Campaigns</NavLink>
-        <NavLink to="/assets" className={({ isActive }) => (isActive ? "active" : "")}>Assets</NavLink>
-        <NavLink to="/users" className={({ isActive }) => (isActive ? "active" : "")}>Users</NavLink>
-        <NavLink to="/account/subscription" className={({ isActive }) => (isActive ? "active" : "")}>Subscription</NavLink>
-        <NavLink to="/audit" className={({ isActive }) => (isActive ? "active" : "")}>Audit</NavLink>
-      </nav>
-      <div className="main">
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/tickers" element={<Tickers />} />
-          <Route path="/tickers/:id" element={<TickerDetail />} />
-          <Route path="/content" element={<ContentList />} />
-          <Route path="/content/:id/edit" element={<Editor />} />
-          <Route path="/templates" element={<Templates />} />
-          <Route path="/animations" element={<Animations />} />
-          <Route path="/campaigns" element={<Campaigns />} />
-          <Route path="/assets" element={<Assets />} />
-          <Route path="/users" element={<Users />} />
-          <Route path="/account/subscription" element={<Subscription />} />
-          <Route path="/audit" element={<Audit />} />
-        </Routes>
-        <ChatDock />
-      </div>
-    </div>
+    <NavLink to={to} end={end} className={className} title={title} aria-label={ariaLabel} onClick={onClick}>
+      {children}
+    </NavLink>
   );
 }
 
-function Login() {
-  const nav = useNavigate();
-  const [email, setEmail] = useState("owner@demo.local");
-  const [password, setPassword] = useState("Demo@12345");
-  const [error, setError] = useState("");
+function CustomerLegacyRedirect() {
+  const { pathname } = useLocation();
+  return <Navigate to={customerLegacyRedirect(pathname) ?? "/tickers"} replace />;
+}
+
+function Authed({ me }: { me: Me }) {
+  const location = useLocation();
+  const navItems = CUSTOMER_NAV.map((item) => ({ ...item, current: navItemCurrent(item, location.pathname) }));
+  const header = customerHeader(location.pathname, me.organization?.name);
   return (
-    <div className="auth-shell">
-      <div className="auth-art">
-        <h1>See the ticker before it goes live.</h1>
-        <p>Subscription-enforced LED content, campaigns, and pixel-true preview — not a cloned control room.</p>
-      </div>
-      <div className="auth-card">
-        <form
-          className="card"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            try {
-              const res = await api<{ token: string }>("/v1/auth/login", {
-                method: "POST",
-                body: JSON.stringify({ email, password }),
-              });
-              setToken(res.token);
-              nav("/");
-            } catch (err) {
-              setError((err as Error).message);
-            }
-          }}
-        >
-          <h2>Sign in</h2>
-          <label>Email</label>
-          <input value={email} onChange={(e) => setEmail(e.target.value)} />
-          <label>Password</label>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-          {error && <p className="error">{error}</p>}
-          <div className="row" style={{ marginTop: 16 }}>
-            <button className="btn" type="submit">Login</button>
-            <Link to="/register">Create organization</Link>
-          </div>
-        </form>
-      </div>
-    </div>
+    <CustomerRoleProvider roleKey={me.roleKey}>
+    <AppShell
+      product="customer"
+      brandLabel="Photonplay"
+      contextLabel="Workspace"
+      headerTitle={header.title}
+      headerMeta={header.meta}
+      navItems={navItems}
+      linkComponent={CustomerLink}
+      onLogout={() => {
+        setToken(null);
+        window.location.href = "/login";
+      }}
+    >
+      <Routes>
+        <Route path="/" element={<Dashboard me={me} />} />
+        <Route path="/tickers" element={<Tickers />} />
+        <Route path="/tickers/:id/design" element={<TickerDesignPage />} />
+        <Route path="/tickers/:id" element={<TickerDetail />} />
+        <Route path="/content/*" element={<CustomerLegacyRedirect />} />
+        <Route path="/content" element={<CustomerLegacyRedirect />} />
+        <Route path="/templates" element={<TemplateLibrary />} />
+        <Route path="/animations" element={<AnimationLibrary />} />
+        <Route path="/campaigns/*" element={<CustomerLegacyRedirect />} />
+        <Route path="/campaigns" element={<CustomerLegacyRedirect />} />
+        <Route path="/assets" element={<AssetLibrary />} />
+        <Route path="/assets/:id" element={<AssetDetail />} />
+        <Route path="/users" element={<Users />} />
+        <Route path="/account/subscription" element={<Subscription />} />
+        <Route path="/account" element={<UnavailablePanel title="Account" />} />
+        <Route path="/schedules" element={<UnavailablePanel title="Schedules" />} />
+        <Route path="/usage" element={<UnavailablePanel title="Usage" />} />
+        <Route path="/notifications" element={<UnavailablePanel title="Notifications" />} />
+        <Route path="/audit" element={<Audit />} />
+      </Routes>
+      <ChatDock />
+    </AppShell>
+    </CustomerRoleProvider>
   );
 }
 
-function Register() {
-  const nav = useNavigate();
-  const [form, setForm] = useState({ email: "", password: "", name: "", organizationName: "" });
-  const [error, setError] = useState("");
+async function completeTenantSignIn(
+  payload: unknown,
+  onAuthenticated: (me: Me) => void,
+) {
+  const login = evaluateLoginToken(payload);
+  if (!login.ok) {
+    clearCustomerSession();
+    throw new Error(login.message);
+  }
+  setToken(login.token);
+  const me = evaluateTenantMe(await api<Me>("/v1/me"));
+  if (!me.ok) {
+    clearCustomerSession();
+    throw new Error(me.message);
+  }
+  onAuthenticated(me.me);
+}
+
+function Login({
+  authenticated,
+  authMessage,
+  onAuthenticated,
+}: {
+  authenticated: boolean;
+  authMessage: string | null;
+  onAuthenticated: (me: Me) => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(authMessage ?? "");
+  useEffect(() => {
+    if (authMessage) setError(authMessage);
+  }, [authMessage]);
+  if (authenticated) return <Navigate to="/" replace />;
   return (
-    <div className="auth-card" style={{ minHeight: "100vh" }}>
+    <AuthLayout productLabel="Photonplay" title="Sign in">
       <form
-        className="card"
+        aria-describedby={error ? "login-error" : undefined}
         onSubmit={async (e) => {
           e.preventDefault();
+          setError("");
           try {
-            const res = await api<{ token: string }>("/v1/auth/register", { method: "POST", body: JSON.stringify(form) });
-            setToken(res.token);
-            nav("/");
+            const res = await api("/v1/auth/login", {
+              method: "POST",
+              body: JSON.stringify({ email, password }),
+            });
+            await completeTenantSignIn(res, onAuthenticated);
           } catch (err) {
-            setError((err as Error).message);
+            clearCustomerSession();
+            const message = (err as Error).message;
+            setError(message === PLATFORM_WORKSPACE_MESSAGE ? message : customerSignInError(err));
           }
         }}
       >
-        <h2>New organization</h2>
-        {(["name", "email", "password", "organizationName"] as const).map((k) => (
-          <div key={k}>
-            <label>{k}</label>
-            <input
-              type={k === "password" ? "password" : "text"}
-              value={form[k]}
-              onChange={(e) => setForm({ ...form, [k]: e.target.value })}
-            />
-          </div>
-        ))}
-        {error && <p className="error">{error}</p>}
-        <button className="btn" style={{ marginTop: 16 }} type="submit">Create</button>
+        <label className="pp-field" htmlFor="login-email">
+          Email
+        </label>
+        <input
+          id="login-email"
+          className="pp-input"
+          type="email"
+          name="email"
+          autoComplete="username"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <label className="pp-field" htmlFor="login-password">
+          Password
+        </label>
+        <input
+          id="login-password"
+          className="pp-input"
+          type="password"
+          name="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {error ? (
+          <p id="login-error" className="error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <div className="row" style={{ marginTop: 16 }}>
+          <button className="btn" type="submit">
+            Login
+          </button>
+          <Link to="/register">Create your account</Link>
+        </div>
       </form>
-    </div>
+    </AuthLayout>
   );
 }
 
-function Dashboard() {
-  const [data, setData] = useState<any>(null);
-  const { me } = useMe();
+function Register({
+  authenticated,
+  onAuthenticated,
+}: {
+  authenticated: boolean;
+  onAuthenticated: (me: Me) => void;
+}) {
+  const [form, setForm] = useState({ email: "", password: "", name: "" });
+  const [error, setError] = useState("");
+  if (authenticated) return <Navigate to="/" replace />;
+  return (
+    <AuthLayout productLabel="Photonplay" title="Create your account">
+      <form
+        aria-describedby={error ? "register-error" : undefined}
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setError("");
+          try {
+            const res = await api("/v1/auth/register", {
+              method: "POST",
+              body: JSON.stringify(buildCustomerRegisterPayload(form)),
+            });
+            await completeTenantSignIn(res, onAuthenticated);
+          } catch (err) {
+            clearCustomerSession();
+            const message = (err as Error).message;
+            setError(message === PLATFORM_WORKSPACE_MESSAGE ? message : customerSignInError(err, UNABLE_TO_REGISTER_MESSAGE));
+          }
+        }}
+      >
+        {CUSTOMER_REGISTER_FIELDS.map((field) => (
+          <div key={field.key}>
+            <label className="pp-field" htmlFor={field.id}>
+              {field.label}
+            </label>
+            <input
+              id={field.id}
+              className="pp-input"
+              type={field.type}
+              name={field.key}
+              autoComplete={field.autoComplete}
+              value={form[field.key]}
+              onChange={(e) => setForm({ ...form, [field.key]: e.target.value })}
+            />
+          </div>
+        ))}
+        {error ? (
+          <p id="register-error" className="error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <button className="btn" style={{ marginTop: 16 }} type="submit">
+          Create account
+        </button>
+        <p className="muted" style={{ marginTop: 16 }}>
+          Already have an account? <Link to="/login">Sign in</Link>
+        </p>
+      </form>
+    </AuthLayout>
+  );
+}
+
+function Dashboard({ me }: { me: Me }) {
+  const [data, setData] = useState<DashboardResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedTickerId, setSelectedTickerId] = useState<string | null>(null);
+  const [playback, setPlayback] = useState<TickerPlayback | null>(null);
+  const [playbackLoading, setPlaybackLoading] = useState(false);
+  const [playbackError, setPlaybackError] = useState("");
+  const { canManageTickers } = useCustomerAccess();
+
+  function load() {
+    setLoading(true);
+    setError(null);
+    Promise.all([api<DashboardResponse>("/v1/dashboard"), api<{ items: DashboardTicker[] }>("/v1/tickers")])
+      .then(([payload, tickerList]) => {
+        const tickers = Array.isArray(tickerList.items) ? tickerList.items : payload.tickers;
+        setData({
+          ...payload,
+          tickers,
+        });
+        const options = dashboardTickerOptions(tickers);
+        const persisted = readPersistedNowPlayingTickerId(window.localStorage, storageKey);
+        setSelectedTickerId(resolveNowPlayingTickerId(persisted, options));
+        setLoading(false);
+      })
+      .catch((err) => {
+        setData(null);
+        setError((err as Error).message?.trim() || "Unable to load the dashboard.");
+        setLoading(false);
+      });
+  }
+
   useEffect(() => {
-    api("/v1/dashboard").then(setData).catch(() => setData(null));
+    load();
   }, []);
-  if (!data) return <p className="muted">Loading dashboard…</p>;
+
+  const tickers = dashboardTickerOptions(data?.tickers);
+  const storageKey = nowPlayingStorageKey(me?.user.id, me?.organization?.id);
+
+  useEffect(() => {
+    if (!data) return;
+    const options = dashboardTickerOptions(data.tickers);
+    const persisted = readPersistedNowPlayingTickerId(window.localStorage, storageKey);
+    setSelectedTickerId((current) => {
+      const preferred = current && options.some((ticker) => ticker.id === current) ? current : persisted;
+      return resolveNowPlayingTickerId(preferred, options);
+    });
+  }, [data, storageKey]);
+
+  useEffect(() => {
+    if (selectedTickerId) writePersistedNowPlayingTickerId(window.localStorage, storageKey, selectedTickerId);
+  }, [selectedTickerId, storageKey]);
+
+  useEffect(() => {
+    if (!selectedTickerId) {
+      setPlayback(null);
+      setPlaybackError("");
+      setPlaybackLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPlayback(null);
+    setPlaybackLoading(true);
+    setPlaybackError("");
+    api<TickerPlayback>(nowPlayingPlaybackPath(selectedTickerId))
+      .then((row) => {
+        if (cancelled) return;
+        setPlayback(row);
+        setPlaybackLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) return;
+        setPlayback(null);
+        setPlaybackError(NOW_PLAYING_PLAYBACK_ERROR);
+        setPlaybackLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTickerId]);
+
+  function onSelectTicker(tickerId: string) {
+    writePersistedNowPlayingTickerId(window.localStorage, storageKey, tickerId);
+    setSelectedTickerId(tickerId);
+  }
+
+  const page = dashboardPageState({ loading, error, data });
+  if (page.kind === "loading") {
+    return (
+      <>
+        <h1>Dashboard</h1>
+        <p className="muted" aria-live="polite">
+          {page.message}
+        </p>
+      </>
+    );
+  }
+  if (page.kind === "error") {
+    return (
+      <>
+        <h1>Dashboard</h1>
+        <p className="error" role="alert">
+          {page.message}
+        </p>
+        <button className="btn" type="button" onClick={load}>
+          Try again
+        </button>
+      </>
+    );
+  }
+
+  const { view } = page;
+  const summary = [
+    me?.organization?.name,
+    me?.roleKey ? workspaceRoleLabel(me.roleKey) : null,
+    view.planStatus ? `plan ${view.planStatus}` : null,
+    view.restricted ? "RESTRICTED" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <>
       <div className="top">
         <div>
           <h1>Dashboard</h1>
-          <p className="muted">
-            {me?.organization?.name} · {me?.roleKey} · plan {data.entitlements?.status}
-            {data.entitlements?.restricted ? " · RESTRICTED" : ""}
-          </p>
+          {summary ? <p className="muted">{summary}</p> : null}
         </div>
-        <button className="btn ghost" onClick={() => { setToken(null); location.href = "/login"; }}>
-          Logout
-        </button>
       </div>
       <div className="grid stats">
-        <div className="stat"><span className="muted">Tickers</span><b>{data.totals.tickers}</b></div>
-        <div className="stat"><span className="muted">Online</span><b>{data.totals.online}</b></div>
-        <div className="stat"><span className="muted">Offline</span><b>{data.totals.offline}</b></div>
-        <div className="stat"><span className="muted">Campaigns</span><b>{data.totals.campaigns}</b></div>
-      </div>
-      <div className="led-wrap" style={{ marginTop: 20 }}>
-        <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-          <strong>Now playing</strong>
-          <span className="muted">{data.preview?.source} {data.preview?.campaignName ?? ""}</span>
-        </div>
-        <LedPreview document={data.preview?.document} />
-      </div>
-    </>
-  );
-}
-
-function Tickers() {
-  const [items, setItems] = useState<any[]>([]);
-  const [name, setName] = useState("Lobby ticker");
-  const [error, setError] = useState("");
-  const load = () => api<{ items: any[] }>("/v1/tickers").then((r) => setItems(r.items));
-  useEffect(() => { load(); }, []);
-  return (
-    <>
-      <div className="top">
-        <h1>Tickers</h1>
-        <form
-          className="row"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            try {
-              await api("/v1/tickers", { method: "POST", body: JSON.stringify({ name, width: 993, height: 32 }) });
-              setError("");
-              load();
-            } catch (err) {
-              setError((err as Error).message);
-            }
-          }}
-        >
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-          <button className="btn" type="submit">Add ticker</button>
-        </form>
-      </div>
-      {error && <p className="error">{error}</p>}
-      <table className="table">
-        <thead><tr><th>Name</th><th>Matrix</th><th>Status</th></tr></thead>
-        <tbody>
-          {items.map((t) => (
-            <tr key={t.id}>
-              <td><Link to={`/tickers/${t.id}`}>{t.name}</Link></td>
-              <td>{t.width}×{t.height}</td>
-              <td><span className={`pill ${t.online ? "on" : "off"}`}>{t.online ? "online" : "offline"}</span></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  );
-}
-
-function TickerDetail() {
-  const { id } = useParams();
-  const [row, setRow] = useState<any>(null);
-  useEffect(() => {
-    api(`/v1/tickers/${id}`).then(setRow);
-  }, [id]);
-  if (!row) return <p className="muted">Loading…</p>;
-  return (
-    <>
-      <h1>{row.name}</h1>
-      <p className="muted">{row.location || "No location"} · {row.width}×{row.height}</p>
-      <div className="row">
-        <button
-          className="btn ghost"
-          onClick={async () => {
-            await api(`/v1/tickers/${id}/heartbeat`, { method: "POST" });
-            setRow(await api(`/v1/tickers/${id}`));
-          }}
-        >
-          Simulate heartbeat
-        </button>
-      </div>
-      <div className="led-wrap" style={{ marginTop: 16 }}>
-        <LedPreview document={row.nowPlaying?.document} />
-      </div>
-    </>
-  );
-}
-
-function ContentList() {
-  const [items, setItems] = useState<any[]>([]);
-  const load = () => api<{ items: any[] }>("/v1/contents").then((r) => setItems(r.items));
-  useEffect(() => { load(); }, []);
-  return (
-    <>
-      <div className="top">
-        <h1>Content</h1>
-        <button
-          className="btn"
-          onClick={async () => {
-            const created = await api<{ id: string }>("/v1/contents", {
-              method: "POST",
-              body: JSON.stringify({ title: "New ticker message", templateId: "tpl_blank" }),
-            });
-            location.href = `/content/${created.id}/edit`;
-          }}
-        >
-          New content
-        </button>
-      </div>
-      <table className="table">
-        <thead><tr><th>Title</th><th>Status</th></tr></thead>
-        <tbody>
-          {items.map((c) => (
-            <tr key={c.id}>
-              <td><Link to={`/content/${c.id}/edit`}>{c.title}</Link></td>
-              <td>{c.status}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  );
-}
-
-function Editor() {
-  const { id } = useParams();
-  const [title, setTitle] = useState("");
-  const [doc, setDoc] = useState<CompositionDocument | null>(null);
-  const [msg, setMsg] = useState("");
-  useEffect(() => {
-    api<any>(`/v1/contents/${id}`).then((r) => {
-      setTitle(r.title);
-      setDoc(r.document);
-    });
-  }, [id]);
-  const textLayer = doc?.layers.find((l) => l.type === "text");
-  const fill = doc?.layers.find((l) => l.type === "fill");
-  return (
-    <>
-      <div className="top">
-        <h1>Editor</h1>
-        <div className="row">
-          <button
-            className="btn ghost"
-            onClick={async () => {
-              await api(`/v1/contents/${id}`, { method: "PATCH", body: JSON.stringify({ title, document: doc }) });
-              setMsg("Draft saved");
-            }}
-          >
-            Save draft
-          </button>
-          <button
-            className="btn"
-            onClick={async () => {
-              try {
-                await api(`/v1/contents/${id}/publish`, { method: "POST" });
-                setMsg("Published to assigned tickers");
-              } catch (e) {
-                setMsg((e as Error).message);
-              }
-            }}
-          >
-            Publish
-          </button>
-        </div>
-      </div>
-      {msg && <p className="muted">{msg}</p>}
-      <div className="editor">
-        <div className="led-wrap"><LedPreview document={doc} /></div>
-        <div className="card">
-          <label>Title</label>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} />
-          <label>Headline</label>
-          <textarea
-            rows={4}
-            value={textLayer && textLayer.type === "text" ? textLayer.props.text : ""}
-            onChange={(e) => {
-              if (!doc) return;
-              setDoc({
-                ...doc,
-                layers: doc.layers.map((l) =>
-                  l.type === "text" ? { ...l, props: { ...l.props, text: e.target.value } } : l,
-                ),
-              });
-            }}
-          />
-          <label>Background</label>
-          <input
-            value={fill && fill.type === "fill" ? fill.props.color : "#050705"}
-            onChange={(e) => {
-              if (!doc) return;
-              setDoc({
-                ...doc,
-                layers: doc.layers.map((l) =>
-                  l.type === "fill" ? { ...l, props: { color: e.target.value } } : l,
-                ),
-              });
-            }}
-          />
-        </div>
-      </div>
-    </>
-  );
-}
-
-function Templates() {
-  const [items, setItems] = useState<any[]>([]);
-  useEffect(() => {
-    api<{ items: any[] }>("/v1/templates").then((r) => setItems(r.items));
-  }, []);
-  return (
-    <>
-      <h1>Templates</h1>
-      <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
-        {items.map((t) => (
-          <div className="card" key={t.id}>
-            <strong>{t.title}</strong>
-            <p className="muted">{t.category}</p>
-            <LedPreview document={t.document} />
-            <button
-              className="btn"
-              style={{ marginTop: 12 }}
-              onClick={async () => {
-                const created = await api<{ id: string }>("/v1/contents", {
-                  method: "POST",
-                  body: JSON.stringify({ title: t.title, templateId: t.id }),
-                });
-                location.href = `/content/${created.id}/edit`;
-              }}
-            >
-              Use template
-            </button>
+        {view.kpis.map((kpi) => (
+          <div className="stat" key={kpi.id}>
+            <span className="muted">{kpi.label}</span>
+            <strong className={kpi.id === "display-status" ? "stat-text" : undefined}>{kpi.value}</strong>
           </div>
         ))}
       </div>
-    </>
-  );
-}
-
-function Animations() {
-  const [items, setItems] = useState<any[]>([]);
-  useEffect(() => {
-    api<{ items: any[] }>("/v1/animation-packs").then((r) => setItems(r.items));
-  }, []);
-  return (
-    <>
-      <h1>Animation packs</h1>
-      <p className="muted">New packs are catalog data — no app deploy required.</p>
-      <table className="table">
-        <thead><tr><th>Pack</th><th>Category</th><th>Access</th></tr></thead>
-        <tbody>
-          {items.map((p) => (
-            <tr key={p.id}>
-              <td>{p.name}</td>
-              <td>{p.category}</td>
-              <td>{p.entitled ? "included" : "plan locked"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  );
-}
-
-function Campaigns() {
-  const [items, setItems] = useState<any[]>([]);
-  const [contents, setContents] = useState<any[]>([]);
-  const [form, setForm] = useState({ name: "Diwali Promotion", contentId: "", priority: 100 });
-  const load = () => api<{ items: any[] }>("/v1/campaigns").then((r) => setItems(r.items));
-  useEffect(() => {
-    load();
-    api<{ items: any[] }>("/v1/contents").then((r) => {
-      setContents(r.items);
-      if (r.items[0]) setForm((f) => ({ ...f, contentId: r.items[0].id }));
-    });
-  }, []);
-  const start = useMemo(() => new Date().toISOString().slice(0, 16), []);
-  const end = useMemo(() => new Date(Date.now() + 86400000 * 16).toISOString().slice(0, 16), []);
-  return (
-    <>
-      <h1>Campaigns</h1>
-      <form
-        className="card"
-        style={{ marginBottom: 16 }}
-        onSubmit={async (e) => {
-          e.preventDefault();
-          const fd = new FormData(e.currentTarget);
-          await api("/v1/campaigns", {
-            method: "POST",
-            body: JSON.stringify({
-              ...form,
-              startAt: new Date(String(fd.get("startAt"))).toISOString(),
-              endAt: new Date(String(fd.get("endAt"))).toISOString(),
-            }),
-          });
-          load();
-        }}
-      >
-        <label>Name</label>
-        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <label>Content</label>
-        <select value={form.contentId} onChange={(e) => setForm({ ...form, contentId: e.target.value })}>
-          {contents.map((c) => (
-            <option key={c.id} value={c.id}>{c.title}</option>
-          ))}
-        </select>
-        <label>Priority (higher wins)</label>
-        <input type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })} />
-        <label>Start</label>
-        <input type="datetime-local" name="startAt" defaultValue={start} />
-        <label>End</label>
-        <input type="datetime-local" name="endAt" defaultValue={end} />
-        <button className="btn" style={{ marginTop: 12 }} type="submit">Schedule</button>
-      </form>
-      <table className="table">
-        <thead><tr><th>Name</th><th>Priority</th><th>Status</th></tr></thead>
-        <tbody>
-          {items.map((c) => (
-            <tr key={c.id}>
-              <td>{c.name}</td>
-              <td>{c.priority}</td>
-              <td>{c.status}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  );
-}
-
-function Assets() {
-  const [items, setItems] = useState<any[]>([]);
-  useEffect(() => {
-    api<{ items: any[] }>("/v1/assets").then((r) => setItems(r.items));
-  }, []);
-  return (
-    <>
-      <h1>Assets</h1>
-      <table className="table">
-        <thead><tr><th>Name</th><th>Kind</th><th>Status</th></tr></thead>
-        <tbody>
-          {items.map((a) => (
-            <tr key={a.id}><td>{a.name}</td><td>{a.kind}</td><td>{a.status}</td></tr>
-          ))}
-        </tbody>
-      </table>
+      <p className="muted dash-note">{view.connectivityNote}</p>
+      <section className="dash-now" aria-labelledby="now-playing-heading" aria-busy={playbackLoading}>
+        <div className="row dash-now-head">
+          <h2 id="now-playing-heading">Now playing</h2>
+          {tickers.length > 0 ? (
+            <label className="dash-now-select-wrap">
+              <span className="sr-only">{NOW_PLAYING_SELECT_LABEL}</span>
+              <select
+                className="dash-now-select"
+                aria-label={NOW_PLAYING_SELECT_LABEL}
+                value={selectedTickerId ?? ""}
+                onChange={(event) => onSelectTicker(event.target.value)}
+              >
+                {tickers.map((ticker) => (
+                  <option key={ticker.id} value={ticker.id}>
+                    {ticker.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
+        {tickers.length === 0 ? (
+          <>
+            <TickerDisplay
+              document={null}
+              scale="large"
+              label="Now playing"
+              emptyMessage={TICKERS_EMPTY_DESCRIPTION}
+            />
+            <p className="muted dash-now-action">
+              <Link to="/tickers">My Tickers</Link>
+              {canManageTickers ? (
+                <>
+                  {" "}
+                  · <Link to="/tickers">Add Ticker</Link>
+                </>
+              ) : null}
+            </p>
+          </>
+        ) : playbackError ? (
+          <TickerDisplay document={null} scale="large" label="Now playing" emptyMessage={playbackError} />
+        ) : (
+          <TickerDisplay
+            document={asCompositionDocument(playback?.document)}
+            scale="large"
+            label="Now playing"
+            emptyMessage={playbackLoading ? NOW_PLAYING_LOADING_MESSAGE : NOW_PLAYING_EMPTY}
+          />
+        )}
+      </section>
+      <section className="dash-activity" aria-labelledby="recent-activity-heading">
+        <h2 id="recent-activity-heading">Recent publishing activity</h2>
+        {view.jobs.length === 0 ? (
+          <p className="muted">{view.jobsEmptyMessage}</p>
+        ) : (
+          <>
+            <div className="activity-table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th scope="col">When</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Trigger</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {view.jobs.map((job) => (
+                    <tr key={job.id}>
+                      <td>{job.when}</td>
+                      <td>
+                        <span className="pill">{job.status}</span>
+                      </td>
+                      <td>{job.trigger}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <ul className="activity-stack">
+              {view.jobs.map((job) => (
+                <li key={`stack-${job.id}`}>
+                  <article>
+                    <h3>{job.status}</h3>
+                    <dl>
+                      <dt>When</dt>
+                      <dd>{job.when}</dd>
+                      <dt>Trigger</dt>
+                      <dd>{job.trigger}</dd>
+                    </dl>
+                  </article>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </section>
     </>
   );
 }
 
 function Users() {
-  const [items, setItems] = useState<any[]>([]);
-  const load = () => api<{ items: any[] }>("/v1/memberships").then((r) => setItems(r.items));
-  useEffect(() => { load(); }, []);
+  const { canInviteUsers } = useCustomerAccess();
+  const [items, setItems] = useState<MembershipRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [inviteRole, setInviteRole] = useState("viewer");
+  const [inviting, setInviting] = useState(false);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteSuccess, setInviteSuccess] = useState("");
+  const canInvite = canInviteUsers;
+
+  async function load(quiet = false) {
+    if (!quiet) {
+      setLoading(true);
+      setError(null);
+    }
+    try {
+      const payload = await api<{ items: MembershipRecord[] }>("/v1/memberships");
+      setItems(Array.isArray(payload.items) ? payload.items : []);
+      setLoading(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      if (quiet) {
+        setInviteSuccess("");
+        setInviteError(USER_INVITE_ERROR);
+        return;
+      }
+      setItems(null);
+      setError((err as Error).message?.trim() || "Unable to load your users.");
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const page = usersPageState({ loading, error, items });
+
+  async function inviteUser(event: { preventDefault(): void }) {
+    event.preventDefault();
+    const validated = validateUserInvite({ name, email, password, roleKey: inviteRole });
+    if (!validated.ok) {
+      setInviteError(validated.message);
+      setInviteSuccess("");
+      return;
+    }
+    setInviting(true);
+    setInviteError("");
+    setInviteSuccess("");
+    try {
+      await api("/v1/memberships", {
+        method: "POST",
+        body: JSON.stringify(validated.body),
+      });
+      setName("");
+      setEmail("");
+      setPassword("");
+      setInviteRole("viewer");
+      setInviteSuccess(USER_INVITE_SUCCESS);
+      await load(true);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setInviteError(USER_INVITE_ERROR);
+    } finally {
+      setInviting(false);
+    }
+  }
+
+  if (page.kind === "loading") {
+    return (
+      <>
+        <h1>Users</h1>
+        <p className="muted" aria-live="polite">
+          {page.message}
+        </p>
+      </>
+    );
+  }
+  if (page.kind === "error") {
+    return (
+      <>
+        <h1>Users</h1>
+        <p className="error" role="alert">
+          {page.message}
+        </p>
+        <button className="btn" type="button" onClick={() => void load()}>
+          Try again
+        </button>
+      </>
+    );
+  }
+
   return (
     <>
       <h1>Users</h1>
-      <form
-        className="card"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          const fd = new FormData(e.currentTarget);
-          await api("/v1/memberships", {
-            method: "POST",
-            body: JSON.stringify({
-              email: fd.get("email"),
-              name: fd.get("name"),
-              password: fd.get("password"),
-              roleKey: fd.get("roleKey"),
-            }),
-          });
-          load();
-        }}
-      >
-        <div className="row">
-          <input name="name" placeholder="Name" required />
-          <input name="email" placeholder="Email" required />
-          <input name="password" placeholder="Temp password" required />
-          <select name="roleKey" defaultValue="viewer">
-            <option>viewer</option>
-            <option>operator</option>
-            <option>designer</option>
-            <option>content_manager</option>
-            <option>organization_admin</option>
-          </select>
-          <button className="btn" type="submit">Invite</button>
+      <p className="muted">{USERS_PAGE_DESCRIPTION}</p>
+      {canInvite ? (
+        <form className="card user-add" onSubmit={(event) => void inviteUser(event)}>
+          <h2>Add user</h2>
+          <div className="user-add__fields">
+            <div>
+              <label className="pp-field" htmlFor="user-name">
+                Full name
+              </label>
+              <input
+                id="user-name"
+                className="pp-input"
+                name="name"
+                autoComplete="name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </div>
+            <div>
+              <label className="pp-field" htmlFor="user-email">
+                Email
+              </label>
+              <input
+                id="user-email"
+                className="pp-input"
+                type="email"
+                name="email"
+                autoComplete="off"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+            </div>
+            <div>
+              <label className="pp-field" htmlFor="user-password">
+                Temporary password
+              </label>
+              <input
+                id="user-password"
+                className="pp-input"
+                type="password"
+                name="password"
+                autoComplete="new-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </div>
+            <div>
+              <label className="pp-field" htmlFor="user-role">
+                Role
+              </label>
+              <select
+                id="user-role"
+                className="pp-input"
+                name="roleKey"
+                value={inviteRole}
+                onChange={(event) => setInviteRole(event.target.value)}
+              >
+                {CUSTOMER_INVITE_ROLES.map((role) => (
+                  <option key={role.value} value={role.value}>
+                    {role.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {inviteError ? (
+            <p className="error" role="alert">
+              {inviteError}
+            </p>
+          ) : null}
+          {inviteSuccess ? (
+            <p className="muted" role="status">
+              {inviteSuccess}
+            </p>
+          ) : null}
+          <button className="btn" type="submit" disabled={inviting}>
+            {userInviteLabel(inviting)}
+          </button>
+        </form>
+      ) : null}
+      {page.empty ? (
+        <div className="empty-state">
+          <h2>{USERS_EMPTY_TITLE}</h2>
+          <p className="muted">{USERS_EMPTY_DESCRIPTION}</p>
         </div>
-      </form>
-      <table className="table">
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th></tr></thead>
-        <tbody>
-          {items.map((m) => (
-            <tr key={m.id}><td>{m.name}</td><td>{m.email}</td><td>{m.roleKey}</td></tr>
-          ))}
-        </tbody>
-      </table>
+      ) : (
+        <>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Email</th>
+                  <th scope="col">Role</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {page.rows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.name}</td>
+                    <td>{row.email}</td>
+                    <td>{row.roleLabel}</td>
+                    <td>
+                      <span className="pill">{row.statusLabel}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <ul className="stack-list">
+            {page.rows.map((row) => (
+              <li key={`stack-${row.id}`}>
+                <article>
+                  <h2>{row.name}</h2>
+                  <dl>
+                    <dt>Email</dt>
+                    <dd>{row.email}</dd>
+                    <dt>Role</dt>
+                    <dd>{row.roleLabel}</dd>
+                    <dt>Status</dt>
+                    <dd>
+                      <span className="pill">{row.statusLabel}</span>
+                    </dd>
+                  </dl>
+                </article>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </>
   );
 }
 
 function Subscription() {
-  const [data, setData] = useState<any>(null);
-  const load = () => api("/v1/billing/subscription").then(setData);
-  useEffect(() => { load(); }, []);
-  if (!data) return null;
+  const { canSimulateSubscription } = useCustomerAccess();
+  const [data, setData] = useState<SubscriptionResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [simulating, setSimulating] = useState<string | null>(null);
+  const [simulateError, setSimulateError] = useState("");
+  const canSimulate = canSimulateSubscription;
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await api<SubscriptionResponse>("/v1/billing/subscription");
+      setData(payload);
+      setLoading(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setData(null);
+      setError((err as Error).message?.trim() || "Unable to load your subscription.");
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const page = subscriptionPageState({ loading, error, data });
+
+  async function simulate(status: string) {
+    setSimulating(status);
+    setSimulateError("");
+    try {
+      await api("/v1/billing/simulate-status", { method: "POST", body: JSON.stringify({ status }) });
+      const payload = await api<SubscriptionResponse>("/v1/billing/subscription");
+      setData(payload);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setSimulateError(SUBSCRIPTION_SIMULATE_ERROR);
+    } finally {
+      setSimulating(null);
+    }
+  }
+
+  if (page.kind === "loading") {
+    return (
+      <>
+        <h1>Subscription</h1>
+        <p className="muted" aria-live="polite">
+          {page.message}
+        </p>
+      </>
+    );
+  }
+  if (page.kind === "error") {
+    return (
+      <>
+        <h1>Subscription</h1>
+        <p className="error" role="alert">
+          {page.message}
+        </p>
+        <button className="btn" type="button" onClick={() => void load()}>
+          Try again
+        </button>
+      </>
+    );
+  }
+
+  const { view } = page;
   return (
     <>
       <h1>Subscription</h1>
-      <p className="muted">{data.note}</p>
+      <p className="muted">{SUBSCRIPTION_PAGE_DESCRIPTION}</p>
+      <p className="muted">{view.note}</p>
       <div className="card">
-        <p>Status: <strong>{data.entitlements.status}</strong></p>
-        <p>Restricted: {String(data.entitlements.restricted)}</p>
-        <p>Devices remaining: {data.entitlements.remaining.devices}</p>
-        <div className="row" style={{ marginTop: 12 }}>
-          {["active", "past_due", "expired", "cancelled", "suspended"].map((s) => (
-            <button
-              key={s}
-              className="btn ghost"
-              onClick={async () => {
-                await api("/v1/billing/simulate-status", { method: "POST", body: JSON.stringify({ status: s }) });
-                load();
-              }}
-            >
-              Simulate {s}
-            </button>
-          ))}
-        </div>
+        <p>
+          Status: <strong>{view.statusLabel}</strong>
+        </p>
+        <p>Restricted: {view.restrictedLabel}</p>
+        <p>Current period end: {view.periodLabel}</p>
+        {view.limits.map((limit) => (
+          <p key={limit.id}>
+            {limit.label}: {limit.value}
+          </p>
+        ))}
       </div>
+      {canSimulate ? (
+        <section className="card subscription-sim" aria-labelledby="subscription-sim-heading">
+          <h2 id="subscription-sim-heading">Simulation (MVP)</h2>
+          <p className="muted">{SUBSCRIPTION_SIMULATION_NOTE}</p>
+          {simulateError ? (
+            <p className="error" role="alert">
+              {simulateError}
+            </p>
+          ) : null}
+          <div className="row" style={{ marginTop: 12 }}>
+            {SIMULATED_STATUSES.map((status) => (
+              <button
+                key={status}
+                className="btn ghost"
+                type="button"
+                disabled={Boolean(simulating)}
+                onClick={() => void simulate(status)}
+              >
+                {simulating === status ? "Simulating…" : `Simulate ${status.replaceAll("_", " ")}`}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </>
   );
 }
 
 function Audit() {
-  const [items, setItems] = useState<any[]>([]);
+  const [items, setItems] = useState<AuditRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await api<{ items: AuditRecord[] }>("/v1/audit-logs");
+      setItems(Array.isArray(payload.items) ? payload.items : []);
+      setLoading(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setItems(null);
+      setError((err as Error).message?.trim() || "Unable to load your audit log.");
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    api<{ items: any[] }>("/v1/audit-logs").then((r) => setItems(r.items));
+    void load();
   }, []);
+
+  const page = auditPageState({ loading, error, items });
+
+  if (page.kind === "loading") {
+    return (
+      <>
+        <h1>Audit</h1>
+        <p className="muted" aria-live="polite">
+          {page.message}
+        </p>
+      </>
+    );
+  }
+  if (page.kind === "error") {
+    return (
+      <>
+        <h1>Audit</h1>
+        <p className="error" role="alert">
+          {page.message}
+        </p>
+        <button className="btn" type="button" onClick={() => void load()}>
+          Try again
+        </button>
+      </>
+    );
+  }
+
   return (
     <>
-      <h1>Audit log</h1>
-      <table className="table">
-        <thead><tr><th>When</th><th>Action</th><th>Source</th></tr></thead>
-        <tbody>
-          {items.map((a) => (
-            <tr key={a.id}>
-              <td>{new Date(a.createdAt).toLocaleString()}</td>
-              <td>{a.action}</td>
-              <td>{a.source}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <h1>Audit</h1>
+      <p className="muted">{AUDIT_PAGE_DESCRIPTION}</p>
+      {page.empty ? (
+        <div className="empty-state">
+          <h2>{AUDIT_EMPTY_TITLE}</h2>
+          <p className="muted">{AUDIT_EMPTY_DESCRIPTION}</p>
+        </div>
+      ) : (
+        <>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Action</th>
+                  <th scope="col">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {page.rows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.when}</td>
+                    <td>{row.action}</td>
+                    <td>{row.source}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <ul className="stack-list">
+            {page.rows.map((row) => (
+              <li key={`stack-${row.id}`}>
+                <article>
+                  <h2>{row.action}</h2>
+                  <dl>
+                    <dt>When</dt>
+                    <dd>{row.when}</dd>
+                    <dt>Source</dt>
+                    <dd>{row.source}</dd>
+                  </dl>
+                </article>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </>
   );
 }
 
 function ChatDock() {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(ASSISTANT_DEFAULT_OPEN);
   const [channel, setChannel] = useState<"guide" | "copilot">("guide");
   const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [chatError, setChatError] = useState("");
   const [log, setLog] = useState<{ role: string; content: string }[]>([
     { role: "bot", content: "Ask where something lives, or describe content to create." },
   ]);
   if (!open) {
     return (
-      <button className="btn" style={{ position: "fixed", right: 18, bottom: 18 }} onClick={() => setOpen(true)}>
+      <button type="button" className="pp-btn pp-btn--ghost chat-launch" aria-label="Open assistant" aria-expanded="false" onClick={() => setOpen(true)}>
         Assistant
       </button>
     );
   }
   return (
-    <div className="chat-dock">
-      <div className="row" style={{ padding: 10, justifyContent: "space-between" }}>
+    <div className="chat-dock" role="dialog" aria-label="Assistant">
+      <div className="row chat-dock__bar">
         <strong>Assistant</strong>
-        <select value={channel} onChange={(e) => setChannel(e.target.value as "guide" | "copilot")}>
+        <select value={channel} onChange={(e) => setChannel(e.target.value as "guide" | "copilot")} aria-label="Assistant mode">
           <option value="guide">Guide</option>
           <option value="copilot">Copilot</option>
         </select>
-        <button className="btn ghost" onClick={() => setOpen(false)}>×</button>
+        <button type="button" className="pp-btn pp-btn--ghost" aria-label="Close assistant" onClick={() => setOpen(false)}>
+          Close
+        </button>
       </div>
       <div className="chat-log">
         {log.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>{m.content}</div>
         ))}
       </div>
+      {chatError ? (
+        <p className="error" role="alert">
+          {chatError}
+        </p>
+      ) : null}
       <form
-        className="row"
-        style={{ padding: 10 }}
+        className="row chat-dock__form"
         onSubmit={async (e) => {
           e.preventDefault();
-          const message = text;
+          const decision = assistantSubmitState(text, sending);
+          if (!decision.ok) {
+            if (decision.reason === "empty") setChatError(decision.message);
+            return;
+          }
+          const message = decision.message;
           setText("");
+          setChatError("");
+          setSending(true);
           setLog((l) => [...l, { role: "user", content: message }]);
-          const res = await api<{ reply: string; href?: string }>("/v1/ai/chat", {
-            method: "POST",
-            body: JSON.stringify({ channel, message, route: location.pathname }),
-          });
-          setLog((l) => [...l, { role: "bot", content: res.reply }]);
-          if (res.href) location.href = res.href;
+          try {
+            const res = await api<{ reply: string; href?: string }>("/v1/ai/chat", {
+              method: "POST",
+              body: JSON.stringify({ channel, message, route: location.pathname }),
+            });
+            setLog((l) => [...l, { role: "bot", content: res.reply }]);
+            if (res.href) location.href = res.href;
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 401) return;
+            setChatError(ASSISTANT_SEND_ERROR);
+          } finally {
+            setSending(false);
+          }
         }}
       >
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask or prompt…" />
-        <button className="btn" type="submit">Send</button>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask or prompt…" aria-label="Assistant message" />
+        <button className="pp-btn pp-btn--primary" type="submit" disabled={sending}>Send</button>
       </form>
     </div>
   );

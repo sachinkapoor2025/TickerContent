@@ -1,37 +1,92 @@
 name: Deploy AWS
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type deploy to run the presentation CDK deployment
+        required: true
+        default: ""
+  workflow_call:
 
 concurrency:
   group: aws-deploy
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
+    if: >
+      (github.event_name == 'workflow_dispatch' && inputs.confirm == 'deploy')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/dev')
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      CDK_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+      TICKER_WEB_ORIGIN: ${{ vars.TICKER_WEB_ORIGIN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run typecheck
       - run: npm run build
+      - name: CDK synth
+        working-directory: infrastructure
+        run: npx cdk synth
       - name: CDK bootstrap and deploy
         working-directory: infrastructure
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CDK_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-          echo "Using account $ACCOUNT in $AWS_REGION"
-          npx cdk bootstrap "aws://$ACCOUNT/$AWS_REGION"
-          CDK_DEFAULT_ACCOUNT="$ACCOUNT" npx cdk deploy --all --require-approval never
+          set -euo pipefail
+          ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          echo "Using account ${ACCOUNT} in ${AWS_REGION}"
+          export CDK_DEFAULT_ACCOUNT="${ACCOUNT}"
+          OUTPUTS_FILE="${RUNNER_TEMP}/ticker-cms-cdk-outputs.json"
+
+          EXISTING_WEB_ORIGIN=""
+          if aws cloudformation describe-stacks --stack-name TickerCmsFrontend >/dev/null 2>&1; then
+            EXISTING_WEB_ORIGIN="$(aws cloudformation describe-stacks --stack-name TickerCmsFrontend --query "Stacks[0].Outputs[?OutputKey=='WebUrl'].OutputValue" --output text || true)"
+          fi
+          WEB_ORIGIN="${EXISTING_WEB_ORIGIN:-}"
+          if [ -z "${WEB_ORIGIN}" ] || [ "${WEB_ORIGIN}" = "None" ]; then
+            WEB_ORIGIN="${TICKER_WEB_ORIGIN:-}"
+          fi
+
+          npx cdk bootstrap "aws://${ACCOUNT}/${AWS_REGION}"
+          if [ -n "${WEB_ORIGIN}" ]; then
+            npx cdk deploy --all --require-approval never -c "webOrigin=${WEB_ORIGIN}" --outputs-file "${OUTPUTS_FILE}"
+          else
+            npx cdk deploy --all --require-approval never --outputs-file "${OUTPUTS_FILE}"
+          fi
+
+          WEB_URL="$(node -e 'const o=require(process.argv[1]); process.stdout.write(o.TickerCmsFrontend.WebUrl || "")' "${OUTPUTS_FILE}")"
+          ADMIN_URL="$(node -e 'const o=require(process.argv[1]); process.stdout.write(o.TickerCmsFrontend.AdminUrl || "")' "${OUTPUTS_FILE}")"
+          ALB_URL="$(node -e 'const o=require(process.argv[1]); process.stdout.write(o.TickerCmsApi.ApiAlbUrl || "")' "${OUTPUTS_FILE}")"
+          CLUSTER="$(node -e 'const o=require(process.argv[1]); process.stdout.write(o.TickerCmsApi.ApiClusterName || "")' "${OUTPUTS_FILE}")"
+          SERVICE="$(node -e 'const o=require(process.argv[1]); process.stdout.write(o.TickerCmsApi.ApiServiceName || "")' "${OUTPUTS_FILE}")"
+
+          if [ -n "${WEB_URL}" ] && [ "${WEB_URL}" != "${WEB_ORIGIN}" ]; then
+            echo "Updating API WEB_ORIGIN to the Customer CloudFront URL"
+            npx cdk deploy TickerCmsApi --require-approval never -c "webOrigin=${WEB_URL}"
+          fi
+
+          aws ecs wait services-stable --cluster "${CLUSTER}" --services "${SERVICE}"
+
+          echo "ALB_URL=${ALB_URL}" >> "${GITHUB_ENV}"
+          echo "WEB_URL=${WEB_URL}" >> "${GITHUB_ENV}"
+          echo "ADMIN_URL=${ADMIN_URL}" >> "${GITHUB_ENV}"
+      - name: Presentation smoke checks
+        working-directory: infrastructure
+        run: |
+          set -euo pipefail
+          node --require ts-node/register scripts/presentation-smoke.ts \
+            --alb-url "${ALB_URL}" \
+            --web-url "${WEB_URL}" \
+            --admin-url "${ADMIN_URL}"

@@ -6,6 +6,8 @@ This folder is the source of truth for product, architecture, and delivery plann
 
 Working name: **Ticker CMS**. Customer-facing brand is TBD; do not assume Photonplay Delta naming, URLs, or UI.
 
+Presentation AWS deploy (GitHub Actions / CDK, no live URLs in this file): [presentation-deployment.md](./presentation-deployment.md)
+
 ## How to read these documents
 
 | Order | Document | Purpose |

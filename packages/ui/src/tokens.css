@@ -1,0 +1,46 @@
+:root {
+  --pp-primary: #1f5eff;
+  --pp-primary-dark: #1747c7;
+  --pp-primary-light: #eaf0ff;
+  --pp-text: #17202a;
+  --pp-text-muted: #5b6773;
+  --pp-bg: #f5f7fa;
+  --pp-surface: #ffffff;
+  --pp-border: #d9e0e8;
+  --pp-divider: #e7ebf0;
+  --pp-success: #16a34a;
+  --pp-warning: #d97706;
+  --pp-error: #dc2626;
+  --pp-info: #2563eb;
+  --pp-focus: #1f5eff;
+  --pp-sidebar-expanded: 240px;
+  --pp-sidebar-collapsed: 72px;
+  --pp-header-height: 64px;
+  --pp-page-padding: 24px;
+  --pp-content-max: 1440px;
+  --pp-radius: 2px;
+  --pp-control-height: 36px;
+  --pp-font: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --pp-space-1: 4px;
+  --pp-space-2: 8px;
+  --pp-space-3: 12px;
+  --pp-space-4: 16px;
+  --pp-space-5: 24px;
+  --pp-space-6: 32px;
+
+  --pp-text-xs: 11px;
+  --pp-text-sm: 12px;
+  --pp-text-md: 13px;
+  --pp-text-lg: 16px;
+  --pp-text-xl: 20px;
+  --pp-text-kpi: 28px;
+
+  --pp-weight-regular: 400;
+  --pp-weight-medium: 500;
+  --pp-weight-semibold: 600;
+  --pp-weight-bold: 700;
+
+  --pp-leading-tight: 1.2;
+  --pp-leading-body: 1.45;
+}

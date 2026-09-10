@@ -10,6 +10,7 @@ const dataDir = process.env.TICKER_DATA_DIR ?? resolve(here, "../../../.data");
 mkdirSync(dataDir, { recursive: true });
 const dbFile = process.env.TICKER_DB_PATH ?? resolve(dataDir, "ticker-cms.sqlite");
 
+export const DATA_DIR = dataDir;
 export const sqlite = new Database(dbFile);
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
@@ -71,6 +72,7 @@ export function migrate() {
       location TEXT,
       width INTEGER NOT NULL,
       height INTEGER NOT NULL,
+      color_mode TEXT NOT NULL DEFAULT 'full',
       orientation TEXT NOT NULL DEFAULT 'landscape',
       status TEXT NOT NULL DEFAULT 'active',
       last_heartbeat_at INTEGER,
@@ -125,6 +127,7 @@ export function migrate() {
       start_at INTEGER NOT NULL,
       end_at INTEGER NOT NULL,
       content_id TEXT NOT NULL,
+      published_version_id TEXT,
       target_ticker_ids_json TEXT NOT NULL DEFAULT '[]',
       recurrence TEXT
     );
@@ -176,7 +179,28 @@ export function migrate() {
       kind TEXT NOT NULL,
       name TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'ready',
+      storage_key TEXT,
+      mime_type TEXT,
+      size_bytes INTEGER,
+      created_at INTEGER,
       meta_json TEXT NOT NULL DEFAULT '{}'
     );
   `);
+
+  const tickerColumns = sqlite.prepare("PRAGMA table_info(tickers)").all() as { name: string }[];
+  if (!tickerColumns.some((column) => column.name === "color_mode")) {
+    sqlite.exec(`ALTER TABLE tickers ADD COLUMN color_mode TEXT NOT NULL DEFAULT 'full'`);
+  }
+
+  const assetColumns = sqlite.prepare("PRAGMA table_info(assets)").all() as { name: string }[];
+  const assetNames = new Set(assetColumns.map((column) => column.name));
+  if (!assetNames.has("storage_key")) sqlite.exec(`ALTER TABLE assets ADD COLUMN storage_key TEXT`);
+  if (!assetNames.has("mime_type")) sqlite.exec(`ALTER TABLE assets ADD COLUMN mime_type TEXT`);
+  if (!assetNames.has("size_bytes")) sqlite.exec(`ALTER TABLE assets ADD COLUMN size_bytes INTEGER`);
+  if (!assetNames.has("created_at")) sqlite.exec(`ALTER TABLE assets ADD COLUMN created_at INTEGER`);
+
+  const campaignColumns = sqlite.prepare("PRAGMA table_info(campaigns)").all() as { name: string }[];
+  if (!campaignColumns.some((column) => column.name === "published_version_id")) {
+    sqlite.exec(`ALTER TABLE campaigns ADD COLUMN published_version_id TEXT`);
+  }
 }
