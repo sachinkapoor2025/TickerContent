@@ -2,7 +2,7 @@
 
 Greenfield multi-tenant **Ticker Content Management SaaS**. Photonplay Delta is reference only — this is a new product.
 
-## Run locally
+## Run locally. 
 
 ```bash
 npm install
