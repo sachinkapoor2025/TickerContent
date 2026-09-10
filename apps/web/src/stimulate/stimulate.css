@@ -1,0 +1,79 @@
+.stimulate-stage {
+  margin: 0 0 24px;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.stimulate-controls {
+  display: grid;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.stimulate-message {
+  margin: 0;
+  min-width: 0;
+}
+
+.stimulate-message .pp-input {
+  margin-top: 6px;
+}
+
+.stimulate-fieldset {
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+.stimulate-legend {
+  display: block;
+  float: none;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pp-text-muted);
+}
+
+.stimulate-control-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.stimulate-segment,
+.stimulate-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stimulate-color[aria-pressed="true"] {
+  border-color: var(--pp-primary);
+  background: var(--pp-primary-light);
+  color: var(--pp-primary-dark);
+}
+
+.stimulate-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--pp-border);
+}
+
+.stimulate-go {
+  justify-self: start;
+}
+
+@media (max-width: 720px) {
+  .stimulate-control-row {
+    grid-template-columns: 1fr;
+  }
+
+  .stimulate-go {
+    width: 100%;
+    justify-self: stretch;
+  }
+}

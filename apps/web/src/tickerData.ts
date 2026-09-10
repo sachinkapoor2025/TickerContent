@@ -5,17 +5,18 @@ export const TICKERS_ERROR_MESSAGE = "Unable to load your tickers.";
 export const TICKER_DETAIL_LOADING_MESSAGE = "Loading ticker…";
 export const TICKER_DETAIL_ERROR_MESSAGE = "Unable to load this ticker.";
 export const TICKERS_EMPTY_TITLE = "No tickers yet";
-export const TICKERS_EMPTY_DESCRIPTION =
-  "Add a ticker to start creating and publishing content for this workspace.";
-export const TICKERS_PAGE_DESCRIPTION =
-  "Manage the displays connected to this workspace and inspect their current configuration.";
-export const TICKER_DETAIL_DESCRIPTION = "Display configuration and current published content.";
+export const TICKERS_EMPTY_DESCRIPTION = "Add a ticker, then design what it will show.";
+export const TICKERS_PAGE_DESCRIPTION = "Manage your LED displays and create what they show.";
+export const TICKER_DETAIL_DESCRIPTION = "Display configuration and what is playing now.";
+export const TICKER_DESIGN_TITLE = "Design Your Ticker";
 export const TICKER_NO_CONTENT = "No content is currently playing";
-export const TICKER_CONTENT_UNAVAILABLE = "Content status unavailable";
-export const TICKER_CREATE_ERROR = "Unable to add ticker.";
+export const TICKER_CONTENT_UNAVAILABLE = "Unable to load now playing";
+export const TICKER_CREATE_ERROR = "Unable to create ticker. Please try again.";
+export const TICKER_CREATE_SUCCESS = "✓ Ticker created";
+export const TICKER_NAME_REQUIRED = "Please enter a ticker name.";
 export const TICKER_SAVE_SUCCESS = "Display configuration saved.";
 export const TICKER_SAVE_ERROR = "Unable to save display configuration.";
-export const TICKER_ADDING_LABEL = "Adding…";
+export const TICKER_ADDING_LABEL = "Creating...";
 export const TICKER_SAVING_LABEL = "Saving…";
 export const CUSTOMER_ASSISTANT_SAFE_PADDING_PX = 80;
 
@@ -57,11 +58,16 @@ export type TickerListRow = {
   id: string;
   name: string;
   href: string;
+  designHref: string;
   profile: string;
+  width: number;
+  height: number;
   colorMode: string;
+  colorModeValue: ColorMode;
   statusLabel: string;
   statusClass: string;
   contentLabel: string;
+  document: unknown | null;
 };
 
 export type TickersPageState =
@@ -117,8 +123,12 @@ export function displayProfileLabel(width: unknown, height: unknown): string {
   return `${w} × ${h} px`;
 }
 
+export function displaySizeLabel(width: unknown, height: unknown): string {
+  return displayProfileLabel(width, height).replace(/ px$/, "");
+}
+
 export function colorModeLabel(mode: unknown): string {
-  if (mode === "full") return "Full color";
+  if (mode === "full") return "Full Color";
   if (mode === "mono") return "Monochrome";
   if (mode === "rg") return "Red-green";
   if (typeof mode === "string" && mode.trim()) return titleCase(mode);
@@ -148,10 +158,10 @@ export function tickerContentLabel(playback: TickerPlayback | null | undefined, 
   if (!playback || playback.source === "empty") return TICKER_NO_CONTENT;
   if (playback.source === "campaign") {
     const name = playback.campaignName?.trim();
-    return name || "Campaign";
+    return name || "Now playing";
   }
-  if (playback.source === "published") return "Published content";
-  if (playback.document != null) return "Published content";
+  if (playback.source === "published") return "Now playing";
+  if (playback.document != null) return "Now playing";
   return TICKER_NO_CONTENT;
 }
 
@@ -159,12 +169,24 @@ export function isPlaybackUnavailableError(err: { status?: number } | null | und
   return err?.status !== 401;
 }
 
-export function createdTickerHref(id: string) {
+export function tickerDetailHref(id: string) {
   return `/tickers/${id}`;
 }
 
+export function tickerDesignHref(id: string) {
+  return `/tickers/${id}/design`;
+}
+
+export function createdTickerHref(id: string) {
+  return tickerDesignHref(id);
+}
+
+export function tickerCreateFailureMessage(_err?: unknown) {
+  return TICKER_CREATE_ERROR;
+}
+
 export function tickerSubmitLabel(kind: "create" | "save", busy: boolean) {
-  if (kind === "create") return busy ? TICKER_ADDING_LABEL : "Add ticker";
+  if (kind === "create") return busy ? TICKER_ADDING_LABEL : "Create Ticker";
   return busy ? TICKER_SAVING_LABEL : "Save";
 }
 
@@ -177,7 +199,7 @@ export function validateTickerProfile(input: TickerProfileInput):
   | { ok: false; values: null; fieldErrors: TickerFieldErrors } {
   const fieldErrors: TickerFieldErrors = {};
   const name = typeof input.name === "string" ? input.name.trim() : "";
-  if (!name) fieldErrors.name = "Enter a ticker name.";
+  if (!name) fieldErrors.name = TICKER_NAME_REQUIRED;
   const width = typeof input.width === "number" ? input.width : Number(input.width);
   if (!Number.isInteger(width) || width < 1) fieldErrors.width = "Width must be a positive number.";
   const height = typeof input.height === "number" ? input.height : Number(input.height);
@@ -217,15 +239,21 @@ export function tickerListRows(
       const playbackState = playbackById[item.id];
       const available = playbackState ? playbackState.available : false;
       const playback = playbackState && playbackState.available ? playbackState.playback : null;
+      const previewEmpty = !available || !playback || playback.source === "empty" || playback.document == null;
       return {
         id: item.id,
         name: item.name?.trim() || "Ticker",
-        href: `/tickers/${item.id}`,
-        profile: displayProfileLabel(item.width, item.height),
+        href: tickerDetailHref(item.id),
+        designHref: tickerDesignHref(item.id),
+        profile: displaySizeLabel(item.width, item.height),
+        width: typeof item.width === "number" && item.width > 0 ? item.width : 620,
+        height: typeof item.height === "number" && item.height > 0 ? item.height : 64,
         colorMode: colorModeLabel(item.colorMode),
+        colorModeValue: isColorMode(item.colorMode) ? item.colorMode : "full",
         statusLabel: tickerStatusLabel(item.status),
         statusClass: tickerStatusClass(item.status),
         contentLabel: tickerContentLabel(playback, available),
+        document: previewEmpty ? null : playback?.document ?? null,
       };
     });
 }
@@ -270,7 +298,7 @@ export function tickerDetailView(
     id: row.id,
     name: row.name?.trim() || "Ticker",
     location: row.location?.trim() || null,
-    profile: displayProfileLabel(row.width, row.height),
+    profile: displaySizeLabel(row.width, row.height),
     colorMode: colorModeLabel(row.colorMode),
     statusLabel: tickerStatusLabel(row.status),
     statusClass: tickerStatusClass(row.status),

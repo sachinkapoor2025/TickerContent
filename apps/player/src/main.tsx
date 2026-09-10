@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { renderFrame, type CompositionDocument, type RenderResources } from "@ticker-cms/composition";
+import type { RenderResources } from "@ticker-cms/composition";
+import { TickerDisplay } from "../../web/src/components/TickerDisplay";
 import { AssetMediaSession } from "../../web/src/media/assetClient";
 import { createLottieRenderer } from "../../web/src/media/lottieRenderer";
 import { loadReferencedMedia } from "./loadMedia";
@@ -12,42 +13,11 @@ import {
   playbackIdentity,
   readStoredToken,
   readTickerId,
+  tickerColorMode,
   type PlaybackResponse,
   type PlayerView,
 } from "./playback";
 import "./styles.css";
-
-function PlayerCanvas({ document, resources }: { document: CompositionDocument; resources: RenderResources }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  const resourcesRef = useRef(resources);
-  resourcesRef.current = resources;
-
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return;
-    canvas.width = document.profile.width;
-    canvas.height = document.profile.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const start = performance.now();
-    let raf = 0;
-    const loop = (now: number) => {
-      renderFrame(document, ctx, now - start, resourcesRef.current);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [document]);
-
-  return (
-    <canvas
-      ref={ref}
-      className="player-canvas"
-      width={document.profile.width}
-      height={document.profile.height}
-    />
-  );
-}
 
 function Message({ title, body }: { title: string; body: string }) {
   return (
@@ -157,15 +127,32 @@ function Player() {
   }
   if (view.kind === "empty") {
     return (
-      <Message
-        title="No published content"
-        body={`${view.ticker.width}×${view.ticker.height} · ${view.ticker.colorMode}`}
-      />
+      <div className="player-shell">
+        <TickerDisplay
+          document={null}
+          profile={{
+            width: view.ticker.width,
+            height: view.ticker.height,
+            colorMode: tickerColorMode(view.ticker.colorMode),
+          }}
+          scale="large"
+          emptyMessage="No published content"
+        />
+        <p className="player-message">
+          <strong>No published content</strong>
+          {`${view.ticker.width}×${view.ticker.height} · ${view.ticker.colorMode}`}
+        </p>
+      </div>
     );
   }
   return (
     <div className="player-shell">
-      <PlayerCanvas document={view.document} resources={resources} />
+      <TickerDisplay
+        document={view.document}
+        resources={resources}
+        scale="large"
+        label="Published LED ticker"
+      />
     </div>
   );
 }

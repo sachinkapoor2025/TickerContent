@@ -4,17 +4,24 @@ import {
   CUSTOMER_ASSISTANT_SAFE_PADDING_PX,
   TICKER_CONTENT_UNAVAILABLE,
   TICKER_CREATE_ERROR,
+  TICKER_CREATE_SUCCESS,
   TICKER_DETAIL_ERROR_MESSAGE,
   TICKER_DETAIL_LOADING_MESSAGE,
   TICKER_FORM_DEFAULTS,
+  TICKER_NAME_REQUIRED,
   TICKER_NO_CONTENT,
   TICKER_SAVE_ERROR,
   TICKER_SAVE_SUCCESS,
   TICKERS_ERROR_MESSAGE,
   TICKERS_LOADING_MESSAGE,
+  TICKERS_PAGE_DESCRIPTION,
   colorModeLabel,
   createdTickerHref,
   displayProfileLabel,
+  displaySizeLabel,
+  tickerCreateFailureMessage,
+  tickerDesignHref,
+  tickerDetailHref,
   isPlaybackUnavailableError,
   needsAssistantSafeSpace,
   tickerContentLabel,
@@ -81,13 +88,15 @@ describe("add ticker form", () => {
       colorMode: "full",
     });
     expect(tickerPatchBody(result.values)).toEqual(tickerCreateBody(result.values));
-    expect(createdTickerHref("tkr_9")).toBe("/tickers/tkr_9");
+    expect(tickerDetailHref("tkr_9")).toBe("/tickers/tkr_9");
+    expect(tickerDesignHref("tkr_9")).toBe("/tickers/tkr_9/design");
+    expect(createdTickerHref("tkr_9")).toBe("/tickers/tkr_9/design");
   });
 
   it("rejects an empty name without inventing one", () => {
     const result = validateTickerProfile({ ...TICKER_FORM_DEFAULTS, name: "   " });
     expect(result.ok).toBe(false);
-    expect(result.fieldErrors.name).toBe("Enter a ticker name.");
+    expect(result.fieldErrors.name).toBe(TICKER_NAME_REQUIRED);
   });
 
   it("rejects a non-positive width", () => {
@@ -109,19 +118,24 @@ describe("add ticker form", () => {
   });
 
   it("uses submitting labels while create or save is in progress", () => {
-    expect(tickerSubmitLabel("create", false)).toBe("Add ticker");
-    expect(tickerSubmitLabel("create", true)).toBe("Adding…");
+    expect(tickerSubmitLabel("create", false)).toBe("Create Ticker");
+    expect(tickerSubmitLabel("create", true)).toBe("Creating...");
     expect(tickerSubmitLabel("save", false)).toBe("Save");
     expect(tickerSubmitLabel("save", true)).toBe("Saving…");
   });
 
-  it("keeps success navigation on the created ticker", () => {
+  it("opens Design Your Ticker after a successful create", () => {
     const created = { id: "tkr_new", name: "Lobby ticker", width: 620, height: 64, colorMode: "full" };
-    expect(createdTickerHref(created.id)).toBe("/tickers/tkr_new");
+    expect(createdTickerHref(created.id)).toBe("/tickers/tkr_new/design");
+    expect(TICKER_CREATE_SUCCESS).toBe("✓ Ticker created");
+    expect(TICKERS_PAGE_DESCRIPTION).toBe("Manage your LED displays and create what they show.");
   });
 
   it("uses a generic create failure message when the API does not succeed", () => {
-    expect(TICKER_CREATE_ERROR).toBe("Unable to add ticker.");
+    expect(TICKER_CREATE_ERROR).toBe("Unable to create ticker. Please try again.");
+    expect(tickerCreateFailureMessage(new Error("String must contain at least 1 character(s)"))).toBe(
+      TICKER_CREATE_ERROR,
+    );
   });
 });
 
@@ -138,16 +152,21 @@ describe("ticker list presentation", () => {
     expect(rows[0]).toMatchObject({
       name: "Lobby ticker",
       href: "/tickers/tkr_1",
-      profile: "620 × 64 px",
-      colorMode: "Full color",
+      designHref: "/tickers/tkr_1/design",
+      profile: "620 × 64",
+      colorMode: "Full Color",
       statusLabel: "Active",
       contentLabel: "Lobby campaign",
     });
     expect(rows[1]?.contentLabel).toBe(TICKER_NO_CONTENT);
+    expect(rows[0]?.document).toEqual({ layers: [] });
+    expect(rows[1]?.document).toBeNull();
+    expect(rows[0]?.width).toBe(620);
+    expect(rows[0]?.height).toBe(64);
   });
 
   it("formats multiple color modes without exposing raw internal values as the only label", () => {
-    expect(colorModeLabel("full")).toBe("Full color");
+    expect(colorModeLabel("full")).toBe("Full Color");
     expect(colorModeLabel("mono")).toBe("Monochrome");
     expect(colorModeLabel("rg")).toBe("Red-green");
   });
@@ -162,6 +181,7 @@ describe("ticker list presentation", () => {
     expect(rows.map((row) => row.statusLabel)).toEqual(["Active", "Suspended"]);
     expect(rows.some((row) => /online|offline/i.test(row.statusLabel))).toBe(false);
     expect(displayProfileLabel(lobby.width, lobby.height)).toBe("620 × 64 px");
+    expect(displaySizeLabel(lobby.width, lobby.height)).toBe("620 × 64");
   });
 
   it("does not invent content when playback is unavailable", () => {
@@ -212,8 +232,8 @@ describe("ticker detail helpers", () => {
     const page = tickerDetailPageState({ loading: false, error: null, row: lobby });
     expect(page.kind).toBe("ready");
     if (page.kind !== "ready") return;
-    expect(page.view.profile).toBe("620 × 64 px");
-    expect(page.view.colorMode).toBe("Full color");
+    expect(page.view.profile).toBe("620 × 64");
+    expect(page.view.colorMode).toBe("Full Color");
     expect(page.view.statusLabel).toBe("Active");
   });
 
@@ -248,7 +268,7 @@ describe("ticker detail helpers", () => {
     });
     expect(page.kind).toBe("ready");
     if (page.kind !== "ready") return;
-    expect(page.view.contentLabel).toBe("Published content");
+    expect(page.view.contentLabel).toBe("Now playing");
     expect(page.view.previewEmpty).toBe(false);
   });
 

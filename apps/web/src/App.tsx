@@ -1,14 +1,11 @@
-import { useEffect, useState } from "react";
-import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { COLOR_MODES, type ColorMode, type CompositionDocument } from "@ticker-cms/composition";
+﻿import { useEffect, useState } from "react";
+import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { AppShell, AuthLayout, UnavailablePanel, type ShellLinkProps } from "@ticker-cms/ui";
 import { api, ApiError, clearCustomerSession, onSessionInvalidated, setToken, token } from "./api";
-import { CampaignDetail } from "./CampaignDetail";
-import { CampaignLibrary } from "./CampaignLibrary";
-import { ContentDetail } from "./ContentDetail";
-import { ContentLibrary } from "./ContentLibrary";
-import { Editor } from "./Editor";
-import { LedPreview } from "./LedPreview";
+import { TickerDisplay } from "./components/TickerDisplay";
+import { asCompositionDocument } from "./components/ledPresentation";
+import { Tickers } from "./Tickers";
+import { TickerDesignPage } from "./TickerDesignPage";
 import { TickerDetail } from "./TickerDetail";
 import { AssetDetail } from "./AssetDetail";
 import { AssetLibrary } from "./AssetLibrary";
@@ -27,28 +24,21 @@ import {
   type CustomerMe,
 } from "./session";
 import {
+  NOW_PLAYING_EMPTY,
+  NOW_PLAYING_LOADING_MESSAGE,
+  NOW_PLAYING_PLAYBACK_ERROR,
+  NOW_PLAYING_SELECT_LABEL,
   dashboardPageState,
+  dashboardTickerOptions,
+  nowPlayingPlaybackPath,
+  nowPlayingStorageKey,
+  readPersistedNowPlayingTickerId,
+  resolveNowPlayingTickerId,
+  writePersistedNowPlayingTickerId,
   type DashboardResponse,
+  type DashboardTicker,
 } from "./dashboardData";
-import {
-  TICKER_CREATE_ERROR,
-  TICKER_FORM_DEFAULTS,
-  TICKERS_EMPTY_DESCRIPTION,
-  TICKERS_EMPTY_TITLE,
-  TICKERS_PAGE_DESCRIPTION,
-  colorModeLabel,
-  createdTickerHref,
-  isPlaybackUnavailableError,
-  tickerCreateBody,
-  tickerSubmitLabel,
-  tickersPageState,
-  validateTickerProfile,
-  type TickerFieldErrors,
-  type TickerPlayback,
-  type TickerPlaybackState,
-  type TickerRecord,
-} from "./tickerData";
-import { ASSISTANT_DEFAULT_OPEN, CUSTOMER_NAV, customerHeader, navItemCurrent } from "./shellNav";
+import { ASSISTANT_DEFAULT_OPEN, CUSTOMER_NAV, customerHeader, customerLegacyRedirect, navItemCurrent } from "./shellNav";
 import { CustomerRoleProvider, useCustomerAccess } from "./CustomerRole";
 import { ASSISTANT_SEND_ERROR, assistantSubmitState } from "./assistantChat";
 import {
@@ -79,20 +69,14 @@ import {
   auditPageState,
   type AuditRecord,
 } from "./auditData";
+import {
+  TICKERS_EMPTY_DESCRIPTION,
+  type TickerPlayback,
+} from "./tickerData";
+import { StimulatePage } from "./stimulate/StimulatePage";
+import { TickerDesignerDemoPage } from "./tickerDesignerDemo/TickerDesignerDemoPage";
 
 type Me = CustomerMe;
-
-function useMe() {
-  const [me, setMe] = useState<Me | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    if (!token()) return;
-    api<Me>("/v1/me")
-      .then(setMe)
-      .catch((e) => setErr(e.message));
-  }, []);
-  return { me, err, setMe };
-}
 
 type SessionStatus = "checking" | "unauthenticated" | "authenticated" | "error";
 
@@ -169,6 +153,17 @@ function useCustomerSession() {
 }
 
 export default function App() {
+  const { pathname } = useLocation();
+  if (pathname === "/stimulate") {
+    return <StimulatePage />;
+  }
+  if (pathname === "/ticker-designer-demo") {
+    return <TickerDesignerDemoPage />;
+  }
+  return <CustomerPortal />;
+}
+
+function CustomerPortal() {
   const session = useCustomerSession();
   if (session.status === "checking") {
     return (
@@ -217,6 +212,11 @@ function CustomerLink({ to, end, className, children, title, onClick, "aria-labe
   );
 }
 
+function CustomerLegacyRedirect() {
+  const { pathname } = useLocation();
+  return <Navigate to={customerLegacyRedirect(pathname) ?? "/tickers"} replace />;
+}
+
 function Authed({ me }: { me: Me }) {
   const location = useLocation();
   const navItems = CUSTOMER_NAV.map((item) => ({ ...item, current: navItemCurrent(item, location.pathname) }));
@@ -237,16 +237,16 @@ function Authed({ me }: { me: Me }) {
       }}
     >
       <Routes>
-        <Route path="/" element={<Dashboard />} />
+        <Route path="/" element={<Dashboard me={me} />} />
         <Route path="/tickers" element={<Tickers />} />
+        <Route path="/tickers/:id/design" element={<TickerDesignPage />} />
         <Route path="/tickers/:id" element={<TickerDetail />} />
-        <Route path="/content" element={<ContentLibrary />} />
-        <Route path="/content/:id/edit" element={<Editor />} />
-        <Route path="/content/:id" element={<ContentDetail />} />
+        <Route path="/content/*" element={<CustomerLegacyRedirect />} />
+        <Route path="/content" element={<CustomerLegacyRedirect />} />
         <Route path="/templates" element={<TemplateLibrary />} />
         <Route path="/animations" element={<AnimationLibrary />} />
-        <Route path="/campaigns" element={<CampaignLibrary />} />
-        <Route path="/campaigns/:id" element={<CampaignDetail />} />
+        <Route path="/campaigns/*" element={<CustomerLegacyRedirect />} />
+        <Route path="/campaigns" element={<CustomerLegacyRedirect />} />
         <Route path="/assets" element={<AssetLibrary />} />
         <Route path="/assets/:id" element={<AssetDetail />} />
         <Route path="/users" element={<Users />} />
@@ -419,18 +419,29 @@ function Register({
   );
 }
 
-function Dashboard() {
+function Dashboard({ me }: { me: Me }) {
   const [data, setData] = useState<DashboardResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const { me } = useMe();
+  const [selectedTickerId, setSelectedTickerId] = useState<string | null>(null);
+  const [playback, setPlayback] = useState<TickerPlayback | null>(null);
+  const [playbackLoading, setPlaybackLoading] = useState(false);
+  const [playbackError, setPlaybackError] = useState("");
+  const { canManageTickers } = useCustomerAccess();
 
   function load() {
     setLoading(true);
     setError(null);
-    api<DashboardResponse>("/v1/dashboard")
-      .then((payload) => {
-        setData(payload);
+    Promise.all([api<DashboardResponse>("/v1/dashboard"), api<{ items: DashboardTicker[] }>("/v1/tickers")])
+      .then(([payload, tickerList]) => {
+        const tickers = Array.isArray(tickerList.items) ? tickerList.items : payload.tickers;
+        setData({
+          ...payload,
+          tickers,
+        });
+        const options = dashboardTickerOptions(tickers);
+        const persisted = readPersistedNowPlayingTickerId(window.localStorage, storageKey);
+        setSelectedTickerId(resolveNowPlayingTickerId(persisted, options));
         setLoading(false);
       })
       .catch((err) => {
@@ -443,6 +454,57 @@ function Dashboard() {
   useEffect(() => {
     load();
   }, []);
+
+  const tickers = dashboardTickerOptions(data?.tickers);
+  const storageKey = nowPlayingStorageKey(me?.user.id, me?.organization?.id);
+
+  useEffect(() => {
+    if (!data) return;
+    const options = dashboardTickerOptions(data.tickers);
+    const persisted = readPersistedNowPlayingTickerId(window.localStorage, storageKey);
+    setSelectedTickerId((current) => {
+      const preferred = current && options.some((ticker) => ticker.id === current) ? current : persisted;
+      return resolveNowPlayingTickerId(preferred, options);
+    });
+  }, [data, storageKey]);
+
+  useEffect(() => {
+    if (selectedTickerId) writePersistedNowPlayingTickerId(window.localStorage, storageKey, selectedTickerId);
+  }, [selectedTickerId, storageKey]);
+
+  useEffect(() => {
+    if (!selectedTickerId) {
+      setPlayback(null);
+      setPlaybackError("");
+      setPlaybackLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPlayback(null);
+    setPlaybackLoading(true);
+    setPlaybackError("");
+    api<TickerPlayback>(nowPlayingPlaybackPath(selectedTickerId))
+      .then((row) => {
+        if (cancelled) return;
+        setPlayback(row);
+        setPlaybackLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) return;
+        setPlayback(null);
+        setPlaybackError(NOW_PLAYING_PLAYBACK_ERROR);
+        setPlaybackLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTickerId]);
+
+  function onSelectTicker(tickerId: string) {
+    writePersistedNowPlayingTickerId(window.localStorage, storageKey, tickerId);
+    setSelectedTickerId(tickerId);
+  }
 
   const page = dashboardPageState({ loading, error, data });
   if (page.kind === "loading") {
@@ -496,15 +558,54 @@ function Dashboard() {
         ))}
       </div>
       <p className="muted dash-note">{view.connectivityNote}</p>
-      <section className="led-wrap dash-now" aria-labelledby="now-playing-heading">
+      <section className="dash-now" aria-labelledby="now-playing-heading" aria-busy={playbackLoading}>
         <div className="row dash-now-head">
           <h2 id="now-playing-heading">Now playing</h2>
-          {view.nowPlayingCaption ? <span className="muted">{view.nowPlayingCaption}</span> : null}
+          {tickers.length > 0 ? (
+            <label className="dash-now-select-wrap">
+              <span className="sr-only">{NOW_PLAYING_SELECT_LABEL}</span>
+              <select
+                className="dash-now-select"
+                aria-label={NOW_PLAYING_SELECT_LABEL}
+                value={selectedTickerId ?? ""}
+                onChange={(event) => onSelectTicker(event.target.value)}
+              >
+                {tickers.map((ticker) => (
+                  <option key={ticker.id} value={ticker.id}>
+                    {ticker.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
         </div>
-        {view.nowPlayingEmpty ? (
-          <p className="led-empty">{view.nowPlayingEmptyMessage}</p>
+        {tickers.length === 0 ? (
+          <>
+            <TickerDisplay
+              document={null}
+              scale="large"
+              label="Now playing"
+              emptyMessage={TICKERS_EMPTY_DESCRIPTION}
+            />
+            <p className="muted dash-now-action">
+              <Link to="/tickers">My Tickers</Link>
+              {canManageTickers ? (
+                <>
+                  {" "}
+                  · <Link to="/tickers">Add Ticker</Link>
+                </>
+              ) : null}
+            </p>
+          </>
+        ) : playbackError ? (
+          <TickerDisplay document={null} scale="large" label="Now playing" emptyMessage={playbackError} />
         ) : (
-          <LedPreview document={view.nowPlayingDocument as CompositionDocument} />
+          <TickerDisplay
+            document={asCompositionDocument(playback?.document)}
+            scale="large"
+            label="Now playing"
+            emptyMessage={playbackLoading ? NOW_PLAYING_LOADING_MESSAGE : NOW_PLAYING_EMPTY}
+          />
         )}
       </section>
       <section className="dash-activity" aria-labelledby="recent-activity-heading">
@@ -519,7 +620,6 @@ function Dashboard() {
                   <tr>
                     <th scope="col">When</th>
                     <th scope="col">Status</th>
-                    <th scope="col">Content</th>
                     <th scope="col">Trigger</th>
                   </tr>
                 </thead>
@@ -530,7 +630,6 @@ function Dashboard() {
                       <td>
                         <span className="pill">{job.status}</span>
                       </td>
-                      <td>{job.contentId}</td>
                       <td>{job.trigger}</td>
                     </tr>
                   ))}
@@ -545,8 +644,6 @@ function Dashboard() {
                     <dl>
                       <dt>When</dt>
                       <dd>{job.when}</dd>
-                      <dt>Content</dt>
-                      <dd>{job.contentId}</dd>
                       <dt>Trigger</dt>
                       <dd>{job.trigger}</dd>
                     </dl>
@@ -557,292 +654,6 @@ function Dashboard() {
           </>
         )}
       </section>
-    </>
-  );
-}
-
-function Tickers() {
-  const navigate = useNavigate();
-  const { canManageTickers } = useCustomerAccess();
-  const [items, setItems] = useState<TickerRecord[] | null>(null);
-  const [playbackById, setPlaybackById] = useState<Record<string, TickerPlaybackState>>({});
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState("");
-  const [fieldErrors, setFieldErrors] = useState<TickerFieldErrors>({});
-  const [name, setName] = useState(TICKER_FORM_DEFAULTS.name);
-  const [width, setWidth] = useState(TICKER_FORM_DEFAULTS.width);
-  const [height, setHeight] = useState(TICKER_FORM_DEFAULTS.height);
-  const [colorMode, setColorMode] = useState<ColorMode>(TICKER_FORM_DEFAULTS.colorMode);
-
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const payload = await api<{ items: TickerRecord[] }>("/v1/tickers");
-      const list = Array.isArray(payload.items) ? payload.items : [];
-      const playbackEntries = await Promise.all(
-        list.map(async (item) => {
-          if (!item.id) return null;
-          try {
-            const playback = await api<TickerPlayback>(`/v1/playback/tickers/${item.id}`);
-            return [item.id, { available: true as const, playback }] as const;
-          } catch (err) {
-            if (!isPlaybackUnavailableError(err as { status?: number })) throw err;
-            return [item.id, { available: false as const }] as const;
-          }
-        }),
-      );
-      const nextPlayback: Record<string, TickerPlaybackState> = {};
-      for (const entry of playbackEntries) {
-        if (entry) nextPlayback[entry[0]] = entry[1];
-      }
-      setItems(list);
-      setPlaybackById(nextPlayback);
-      setLoading(false);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return;
-      setItems(null);
-      setPlaybackById({});
-      setError((err as Error).message?.trim() || "Unable to load your tickers.");
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void load();
-  }, []);
-
-  const page = tickersPageState({ loading, error, items, playbackById });
-
-  async function createTicker(event: { preventDefault(): void }) {
-    event.preventDefault();
-    const validated = validateTickerProfile({ name, width, height, colorMode });
-    if (!validated.ok) {
-      setFieldErrors(validated.fieldErrors);
-      setCreateError("");
-      return;
-    }
-    setFieldErrors({});
-    setCreating(true);
-    try {
-      const created = await api<TickerRecord>("/v1/tickers", {
-        method: "POST",
-        body: JSON.stringify(tickerCreateBody(validated.values)),
-      });
-      setCreateError("");
-      if (created.id) {
-        navigate(createdTickerHref(created.id));
-        return;
-      }
-      await load();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return;
-      setCreateError((err as Error).message?.trim() || TICKER_CREATE_ERROR);
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  if (page.kind === "loading") {
-    return (
-      <>
-        <h1>My Tickers</h1>
-        <p className="muted" aria-live="polite">
-          {page.message}
-        </p>
-      </>
-    );
-  }
-
-  if (page.kind === "error") {
-    return (
-      <>
-        <h1>My Tickers</h1>
-        <p className="error" role="alert">
-          {page.message}
-        </p>
-        <button className="pp-btn pp-btn--ghost" type="button" onClick={() => void load()}>
-          Try again
-        </button>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <div className="top">
-        <div>
-          <h1>My Tickers</h1>
-          <p className="muted page-lead">{TICKERS_PAGE_DESCRIPTION}</p>
-        </div>
-        <p className="ticker-total">
-          Total tickers: <strong>{page.total}</strong>
-        </p>
-      </div>
-      {canManageTickers ? (
-      <form id="add-ticker" className="card ticker-add" onSubmit={(event) => void createTicker(event)}>
-        <h2>Add ticker</h2>
-        <div className="ticker-add__fields">
-          <div>
-            <label htmlFor="ticker-create-name">Ticker name</label>
-            <input
-              id="ticker-create-name"
-              className="pp-input"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoComplete="off"
-              aria-invalid={Boolean(fieldErrors.name)}
-              aria-describedby={fieldErrors.name ? "ticker-create-name-error" : undefined}
-            />
-            {fieldErrors.name ? (
-              <p id="ticker-create-name-error" className="error" role="alert">
-                {fieldErrors.name}
-              </p>
-            ) : null}
-          </div>
-          <div>
-            <label htmlFor="ticker-create-width">Width</label>
-            <input
-              id="ticker-create-width"
-              className="pp-input"
-              type="number"
-              min={1}
-              step={1}
-              value={width}
-              onChange={(e) => setWidth(Number(e.target.value))}
-              aria-invalid={Boolean(fieldErrors.width)}
-              aria-describedby={fieldErrors.width ? "ticker-create-width-error" : undefined}
-            />
-            {fieldErrors.width ? (
-              <p id="ticker-create-width-error" className="error" role="alert">
-                {fieldErrors.width}
-              </p>
-            ) : null}
-          </div>
-          <div>
-            <label htmlFor="ticker-create-height">Height</label>
-            <input
-              id="ticker-create-height"
-              className="pp-input"
-              type="number"
-              min={1}
-              step={1}
-              value={height}
-              onChange={(e) => setHeight(Number(e.target.value))}
-              aria-invalid={Boolean(fieldErrors.height)}
-              aria-describedby={fieldErrors.height ? "ticker-create-height-error" : undefined}
-            />
-            {fieldErrors.height ? (
-              <p id="ticker-create-height-error" className="error" role="alert">
-                {fieldErrors.height}
-              </p>
-            ) : null}
-          </div>
-          <div>
-            <label htmlFor="ticker-create-color">Color mode</label>
-            <select
-              id="ticker-create-color"
-              className="pp-input"
-              value={colorMode}
-              onChange={(e) => setColorMode(e.target.value as ColorMode)}
-              aria-invalid={Boolean(fieldErrors.colorMode)}
-              aria-describedby={fieldErrors.colorMode ? "ticker-create-color-error" : undefined}
-            >
-              {COLOR_MODES.map((mode) => (
-                <option key={mode} value={mode}>
-                  {colorModeLabel(mode)}
-                </option>
-              ))}
-            </select>
-            {fieldErrors.colorMode ? (
-              <p id="ticker-create-color-error" className="error" role="alert">
-                {fieldErrors.colorMode}
-              </p>
-            ) : null}
-          </div>
-        </div>
-        {createError ? (
-          <p className="error" role="alert">
-            {createError}
-          </p>
-        ) : null}
-        <button className="pp-btn pp-btn--primary" type="submit" disabled={creating}>
-          {tickerSubmitLabel("create", creating)}
-        </button>
-      </form>
-      ) : null}
-      {page.empty ? (
-        <div className="empty-state">
-          <h2>{TICKERS_EMPTY_TITLE}</h2>
-          <p className="muted">{TICKERS_EMPTY_DESCRIPTION}</p>
-        </div>
-      ) : (
-        <>
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th scope="col">Ticker</th>
-                  <th scope="col">Display profile</th>
-                  <th scope="col">Color mode</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Current content</th>
-                  <th scope="col">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {page.rows.map((row) => (
-                  <tr key={row.id}>
-                    <td>
-                      <Link className="pp-btn pp-btn--link" to={row.href}>
-                        {row.name}
-                      </Link>
-                    </td>
-                    <td>{row.profile}</td>
-                    <td>{row.colorMode}</td>
-                    <td>
-                      <span className={row.statusClass}>{row.statusLabel}</span>
-                    </td>
-                    <td>{row.contentLabel}</td>
-                    <td>
-                      <Link className="pp-btn pp-btn--link" to={row.href}>
-                        Open
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <ul className="stack-list">
-            {page.rows.map((row) => (
-              <li key={`stack-${row.id}`}>
-                <article>
-                  <h2>{row.name}</h2>
-                  <dl>
-                    <dt>Display profile</dt>
-                    <dd>{row.profile}</dd>
-                    <dt>Color mode</dt>
-                    <dd>{row.colorMode}</dd>
-                    <dt>Status</dt>
-                    <dd>
-                      <span className={row.statusClass}>{row.statusLabel}</span>
-                    </dd>
-                    <dt>Current content</dt>
-                    <dd>{row.contentLabel}</dd>
-                  </dl>
-                  <Link className="pp-btn pp-btn--link" to={row.href}>
-                    Open
-                  </Link>
-                </article>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
     </>
   );
 }

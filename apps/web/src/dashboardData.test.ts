@@ -6,10 +6,17 @@ import {
   DISPLAY_STATUS_VALUE,
   JOBS_EMPTY,
   NOW_PLAYING_EMPTY,
+  NOW_PLAYING_STORAGE_PREFIX,
   dashboardPageState,
+  dashboardTickerOptions,
   dashboardView,
   formatDashboardWhen,
   isNowPlayingEmpty,
+  nowPlayingPlaybackPath,
+  nowPlayingStorageKey,
+  readPersistedNowPlayingTickerId,
+  resolveNowPlayingTickerId,
+  writePersistedNowPlayingTickerId,
   type DashboardResponse,
 } from "./dashboardData.js";
 
@@ -41,13 +48,13 @@ function populatedDashboard(): DashboardResponse {
 }
 
 describe("dashboard KPIs", () => {
-  it("shows ticker and campaign counts from the dashboard payload", () => {
+  it("shows ticker counts without a campaigns KPI", () => {
     const view = dashboardView(populatedDashboard());
     expect(view.kpis).toEqual([
       { id: "tickers", label: "Tickers", value: "4" },
-      { id: "campaigns", label: "Campaigns", value: "3" },
       { id: "display-status", label: "Display status", value: DISPLAY_STATUS_VALUE },
     ]);
+    expect(view.kpis.some((kpi) => /campaign/i.test(kpi.label) || kpi.id === "campaigns")).toBe(false);
   });
 
   it("does not present heartbeat online/offline as connectivity KPIs", () => {
@@ -67,11 +74,12 @@ describe("dashboard KPIs", () => {
     expect(view.kpis.find((kpi) => kpi.id === "tickers")?.value).toBe("0");
   });
 
-  it("shows an empty campaign count without inventing campaigns", () => {
+  it("does not surface campaign counts on the customer dashboard", () => {
     const view = dashboardView({
       totals: { tickers: 2, online: 0, offline: 2, campaigns: 0 },
     });
-    expect(view.kpis.find((kpi) => kpi.id === "campaigns")?.value).toBe("0");
+    expect(view.kpis.find((kpi) => kpi.id === "tickers")?.value).toBe("2");
+    expect(view.kpis.some((kpi) => kpi.id === "campaigns" || /campaign/i.test(kpi.label))).toBe(false);
   });
 });
 
@@ -163,5 +171,90 @@ describe("timestamp presentation", () => {
     expect(formatDashboardWhen(null)).toBe("—");
     expect(formatDashboardWhen("not-a-date")).toBe("—");
     expect(formatDashboardWhen("2026-01-15T12:00:00.000Z")).not.toBe("—");
+  });
+});
+
+function memoryStorage(initial: Record<string, string> = {}) {
+  const store = new Map(Object.entries(initial));
+  return {
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      store.set(key, value);
+    },
+  };
+}
+
+const customerTickers = [
+  { id: "tkr_lobby", name: "Lobby" },
+  { id: "tkr_concourse", name: "Concourse" },
+];
+
+describe("now playing ticker selector", () => {
+  it("builds selector options from the authenticated ticker list", () => {
+    expect(dashboardTickerOptions(customerTickers)).toEqual([
+      { id: "tkr_lobby", name: "Lobby" },
+      { id: "tkr_concourse", name: "Concourse" },
+    ]);
+    expect(dashboardTickerOptions([{ id: "", name: "Ghost" }, { name: "No id" }])).toEqual([]);
+  });
+
+  it("defaults to the first available customer ticker", () => {
+    expect(resolveNowPlayingTickerId(null, dashboardTickerOptions(customerTickers))).toBe("tkr_lobby");
+  });
+
+  it("restores a persisted selection when it still belongs to the customer", () => {
+    const options = dashboardTickerOptions(customerTickers);
+    expect(resolveNowPlayingTickerId("tkr_concourse", options)).toBe("tkr_concourse");
+  });
+
+  it("discards a deleted or inaccessible persisted ticker and falls back safely", () => {
+    const options = dashboardTickerOptions(customerTickers);
+    expect(resolveNowPlayingTickerId("tkr_deleted", options)).toBe("tkr_lobby");
+    expect(resolveNowPlayingTickerId("tkr_other_org", options)).toBe("tkr_lobby");
+    expect(resolveNowPlayingTickerId("tkr_lobby", [])).toBeNull();
+  });
+
+  it("loads playback for the selected ticker id", () => {
+    expect(nowPlayingPlaybackPath("tkr_concourse")).toBe("/v1/playback/tickers/tkr_concourse");
+  });
+
+  it("never selects a ticker that is not in the current customer list", () => {
+    const orgA = dashboardTickerOptions([{ id: "tkr_a", name: "Org A Lobby" }]);
+    const orgB = dashboardTickerOptions([{ id: "tkr_b", name: "Org B Lobby" }]);
+    expect(resolveNowPlayingTickerId("tkr_a", orgB)).toBe("tkr_b");
+    expect(resolveNowPlayingTickerId("tkr_b", orgA)).toBe("tkr_a");
+    expect(orgA.some((ticker) => ticker.id === "tkr_b")).toBe(false);
+  });
+});
+
+describe("now playing selection persistence", () => {
+  it("stores only the selected ticker id for the current user and organization", () => {
+    const storage = memoryStorage();
+    const key = nowPlayingStorageKey("usr_1", "org_1");
+    expect(key).toBe(`${NOW_PLAYING_STORAGE_PREFIX}:usr_1:org_1`);
+    writePersistedNowPlayingTickerId(storage, key, "tkr_concourse");
+    expect(readPersistedNowPlayingTickerId(storage, key)).toBe("tkr_concourse");
+  });
+
+  it("does not reuse another organization or user's persisted ticker id", () => {
+    const storage = memoryStorage();
+    writePersistedNowPlayingTickerId(storage, nowPlayingStorageKey("usr_1", "org_1"), "tkr_a");
+    writePersistedNowPlayingTickerId(storage, nowPlayingStorageKey("usr_1", "org_2"), "tkr_b");
+    expect(readPersistedNowPlayingTickerId(storage, nowPlayingStorageKey("usr_1", "org_1"))).toBe("tkr_a");
+    expect(readPersistedNowPlayingTickerId(storage, nowPlayingStorageKey("usr_1", "org_2"))).toBe("tkr_b");
+    expect(readPersistedNowPlayingTickerId(storage, nowPlayingStorageKey("usr_2", "org_1"))).toBeNull();
+  });
+
+  it("survives a logout/login by remaining in storage after the session token is cleared", () => {
+    const storage = memoryStorage({ ticker_cms_token: "session-token" });
+    const key = nowPlayingStorageKey("usr_1", "org_1");
+    writePersistedNowPlayingTickerId(storage, key, "tkr_concourse");
+    storage.setItem("ticker_cms_token", "");
+    expect(readPersistedNowPlayingTickerId(storage, key)).toBe("tkr_concourse");
+    expect(resolveNowPlayingTickerId("tkr_concourse", dashboardTickerOptions(customerTickers))).toBe(
+      "tkr_concourse",
+    );
   });
 });

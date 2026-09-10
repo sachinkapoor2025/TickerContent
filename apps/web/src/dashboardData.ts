@@ -3,7 +3,12 @@ export const DASHBOARD_ERROR_MESSAGE = "Unable to load the dashboard.";
 export const DISPLAY_STATUS_VALUE = "Not available";
 export const CONNECTIVITY_NOTE = "Live display connectivity is not available in the current MVP.";
 export const NOW_PLAYING_EMPTY = "No content is currently playing";
+export const NOW_PLAYING_SELECT_LABEL = "Select ticker";
+export const NOW_PLAYING_LOADING_MESSAGE = "Loading ticker…";
+export const NOW_PLAYING_PLAYBACK_ERROR = "Unable to load this ticker.";
+export const NOW_PLAYING_NO_TICKERS_ACTION = "Go to My Tickers to add a ticker.";
 export const JOBS_EMPTY = "No publishing activity yet.";
+export const NOW_PLAYING_STORAGE_PREFIX = "ticker_cms_now_playing";
 
 export type DashboardPreview = {
   source?: string | null;
@@ -27,6 +32,16 @@ export type DashboardTicker = {
   name?: string | null;
 };
 
+export type DashboardTickerOption = {
+  id: string;
+  name: string;
+};
+
+type NowPlayingStorage = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+};
+
 export type DashboardResponse = {
   totals?: {
     tickers?: number;
@@ -44,7 +59,7 @@ export type DashboardResponse = {
 };
 
 export type DashboardKpi = {
-  id: "tickers" | "campaigns" | "display-status";
+  id: "tickers" | "display-status";
   label: string;
   value: string;
 };
@@ -98,6 +113,64 @@ export function isNowPlayingEmpty(preview?: DashboardPreview | null): boolean {
   return preview.document == null;
 }
 
+export function dashboardTickerOptions(tickers: DashboardTicker[] | undefined): DashboardTickerOption[] {
+  if (!Array.isArray(tickers)) return [];
+  const options: DashboardTickerOption[] = [];
+  for (const ticker of tickers) {
+    if (typeof ticker.id !== "string" || !ticker.id.trim()) continue;
+    const name = typeof ticker.name === "string" ? ticker.name.trim() : "";
+    options.push({ id: ticker.id, name: name || "Ticker" });
+  }
+  return options;
+}
+
+export function resolveNowPlayingTickerId(
+  persistedId: string | null | undefined,
+  tickers: DashboardTickerOption[],
+): string | null {
+  if (tickers.length === 0) return null;
+  if (typeof persistedId === "string" && tickers.some((ticker) => ticker.id === persistedId)) {
+    return persistedId;
+  }
+  return tickers[0]?.id ?? null;
+}
+
+export function nowPlayingStorageKey(userId: unknown, organizationId: unknown): string | null {
+  if (typeof userId !== "string" || !userId.trim()) return null;
+  if (typeof organizationId !== "string" || !organizationId.trim()) return null;
+  return `${NOW_PLAYING_STORAGE_PREFIX}:${userId.trim()}:${organizationId.trim()}`;
+}
+
+export function readPersistedNowPlayingTickerId(
+  storage: NowPlayingStorage | null | undefined,
+  key: string | null | undefined,
+): string | null {
+  if (!storage || !key) return null;
+  try {
+    const value = storage.getItem(key);
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writePersistedNowPlayingTickerId(
+  storage: NowPlayingStorage | null | undefined,
+  key: string | null | undefined,
+  tickerId: string | null | undefined,
+): void {
+  if (!storage || !key || typeof tickerId !== "string" || !tickerId.trim()) return;
+  try {
+    storage.setItem(key, tickerId.trim());
+  } catch {
+    // Ignore quota or private-mode failures; selection still works for this session.
+  }
+}
+
+export function nowPlayingPlaybackPath(tickerId: string): string {
+  return `/v1/playback/tickers/${tickerId}`;
+}
+
 export function nowPlayingCaption(preview?: DashboardPreview | null, tickerName?: string | null): string {
   if (isNowPlayingEmpty(preview)) return "";
   const parts: string[] = [];
@@ -128,7 +201,6 @@ export function recentPublishingActivity(jobs: DashboardJob[] | undefined): Publ
 export function dashboardKpis(data: DashboardResponse): DashboardKpi[] {
   return [
     { id: "tickers", label: "Tickers", value: String(countNumber(data.totals?.tickers)) },
-    { id: "campaigns", label: "Campaigns", value: String(countNumber(data.totals?.campaigns)) },
     { id: "display-status", label: "Display status", value: DISPLAY_STATUS_VALUE },
   ];
 }

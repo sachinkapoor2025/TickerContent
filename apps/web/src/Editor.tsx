@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { layerZIndex, type ColorMode, type CompositionDocument, type Layer } from "@ticker-cms/composition";
 import { api, ApiError } from "./api";
 import { useCustomerAccess } from "./CustomerRole";
-import { LedPreview } from "./LedPreview";
+import { TickerDisplay } from "./components/TickerDisplay";
 import {
   addFillLayer,
   addImageLayer,
@@ -44,10 +44,11 @@ import {
   profileFromTicker,
   resolveEditorProfile,
   saveDraftBody,
+  tickerEditorBackHref,
   type EditorAsset,
 } from "./editor/editorState";
 import { useCompositionMedia } from "./editor/useCompositionMedia";
-import { colorModeLabel, displayProfileLabel } from "./tickerData";
+import { TICKER_DESIGN_TITLE, TICKER_DETAIL_ERROR_MESSAGE, colorModeLabel, displayProfileLabel } from "./tickerData";
 
 type TickerRow = { id: string; name: string; width: number; height: number; colorMode?: ColorMode };
 type AssetRow = { id: string; name: string; kind: string };
@@ -59,9 +60,10 @@ type ContentPayload = {
   publishedVersionId?: string | null;
 };
 
-export function Editor() {
+export function Editor({ boundTickerId }: { boundTickerId?: string } = {}) {
   const { id } = useParams();
   const { canWriteContent, canPublish } = useCustomerAccess();
+  const tickerBound = Boolean(boundTickerId);
   const [title, setTitle] = useState("");
   const [doc, setDoc] = useState<CompositionDocument | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
@@ -79,7 +81,65 @@ export function Editor() {
   const [saving, setSaving] = useState(false);
   const { resources, error: mediaError } = useCompositionMedia(doc);
 
+  async function loadAssets() {
+    try {
+      const assetsPayload = await api<{ items: AssetRow[] }>("/v1/assets");
+      return Array.isArray(assetsPayload.items) ? assetsPayload.items : [];
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      return [] as AssetRow[];
+    }
+  }
+
+  async function loadTickerList() {
+    try {
+      const tickersPayload = await api<{ items: TickerRow[] }>("/v1/tickers");
+      return Array.isArray(tickersPayload.items) ? tickersPayload.items : [];
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      return [] as TickerRow[];
+    }
+  }
+
   async function load() {
+    if (boundTickerId) {
+      setLoading(true);
+      setError(null);
+      try {
+        const ticker = await api<TickerRow>(`/v1/tickers/${boundTickerId}`);
+        const tickerList = await loadTickerList();
+        const assetList = await loadAssets();
+        const selectedTicker = tickerList.find((item) => item.id === boundTickerId) ?? ticker;
+        const nextList = tickerList.some((item) => item.id === boundTickerId) ? tickerList : [ticker, ...tickerList];
+        const profile = resolveEditorProfile({ ticker: selectedTicker, document: null });
+        const nextDoc = documentForEditor({ payload: {}, profile });
+        if (!nextDoc) {
+          setDoc(null);
+          setError(TICKER_DETAIL_ERROR_MESSAGE);
+          setLoading(false);
+          return;
+        }
+        const nextTitle = selectedTicker.name?.trim() || TICKER_DESIGN_TITLE;
+        setTitle(nextTitle);
+        setDoc(nextDoc);
+        setBaseline(editorSnapshot(nextTitle, nextDoc));
+        setHeadVersionId(null);
+        setPublishedVersionId(null);
+        setTickers(nextList);
+        setTickerId(boundTickerId);
+        setAssets(assetList);
+        setSelectedId(nextDoc.layers[0]?.id ?? null);
+        setMsg("");
+        setSaveError("");
+        setLoading(false);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) return;
+        setDoc(null);
+        setError(TICKER_DETAIL_ERROR_MESSAGE);
+        setLoading(false);
+      }
+      return;
+    }
     if (!id) return;
     setLoading(true);
     setError(null);
@@ -88,14 +148,12 @@ export function Editor() {
       let tickerList: TickerRow[] = [];
       let assetList: AssetRow[] = [];
       try {
-        const tickersPayload = await api<{ items: TickerRow[] }>("/v1/tickers");
-        tickerList = Array.isArray(tickersPayload.items) ? tickersPayload.items : [];
+        tickerList = await loadTickerList();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) return;
       }
       try {
-        const assetsPayload = await api<{ items: AssetRow[] }>("/v1/assets");
-        assetList = Array.isArray(assetsPayload.items) ? assetsPayload.items : [];
+        assetList = await loadAssets();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) return;
       }
@@ -133,7 +191,7 @@ export function Editor() {
 
   useEffect(() => {
     void load();
-  }, [id]);
+  }, [id, boundTickerId]);
 
   const selectedTicker = tickers.find((ticker) => ticker.id === tickerId) ?? null;
   const profile = doc?.profile ?? profileFromTicker(selectedTicker);
@@ -152,7 +210,7 @@ export function Editor() {
   };
 
   async function saveVersion() {
-    if (!id || !doc) return;
+    if (tickerBound || !id || !doc) return;
     const valid = canSaveDocument(doc);
     if (!valid.ok) {
       setSaveError(valid.message);
@@ -179,7 +237,7 @@ export function Editor() {
   if (page.kind === "loading") {
     return (
       <>
-        <h1>Editor</h1>
+        <h1>{tickerBound ? TICKER_DESIGN_TITLE : "Editor"}</h1>
         <p className="muted" aria-live="polite">
           {page.message}
         </p>
@@ -190,14 +248,14 @@ export function Editor() {
   if (page.kind === "error") {
     return (
       <>
-        {id ? (
-          <p>
-            <Link className="pp-btn pp-btn--link" to={contentEditorBackHref(id)}>
-              Content
-            </Link>
-          </p>
+        {tickerBound || id ? (
+        <p>
+          <Link className="pp-btn pp-btn--link" to={tickerBound ? tickerEditorBackHref() : contentEditorBackHref(id ?? "")}>
+            {tickerBound ? "My Tickers" : "Content"}
+          </Link>
+        </p>
         ) : null}
-        <h1>Editor</h1>
+        <h1>{tickerBound ? TICKER_DESIGN_TITLE : "Editor"}</h1>
         <p className="error" role="alert">
           {page.message}
         </p>
@@ -213,24 +271,24 @@ export function Editor() {
   return (
     <>
       <div className="editor-header">
-        {id ? (
-          <p>
-            <Link className="pp-btn pp-btn--link" to={contentEditorBackHref(id)}>
-              Content
-            </Link>
-          </p>
-        ) : null}
+        <p>
+          <Link className="pp-btn pp-btn--link" to={tickerBound ? tickerEditorBackHref() : contentEditorBackHref(id ?? "")}>
+            {tickerBound ? "My Tickers" : "Content"}
+          </Link>
+        </p>
         <div className="top">
           <div>
-            <h1>{title.trim() || "Untitled content"}</h1>
+            <h1>{tickerBound ? TICKER_DESIGN_TITLE : title.trim() || "Untitled content"}</h1>
             <p className="muted page-lead">
+              {selectedTicker?.name ? `${selectedTicker.name} · ` : ""}
               {displayProfileLabel(profile.width, profile.height)} · {colorModeLabel(profile.colorMode)}
-              {selectedTicker?.name ? ` · ${selectedTicker.name}` : ""}
             </p>
           </div>
+          {tickerBound ? null : (
           <p className="muted" aria-live="polite">
             {editorSaveStatus({ dirty, saving })}
           </p>
+          )}
         </div>
       </div>
       <div className="editor-toolbar" role="toolbar" aria-label="Editor tools">
@@ -252,12 +310,14 @@ export function Editor() {
         <button className="pp-btn pp-btn--ghost" type="button" onClick={() => setPicker("lottie")}>
           Add Lottie
         </button>
+        {tickerBound ? null : (
         <button className="pp-btn pp-btn--primary" type="button" onClick={() => void saveVersion()} disabled={saving}>
           {editorSubmitLabel(saving)}
         </button>
+        )}
           </>
         ) : null}
-        {canPublish ? (
+        {canPublish && !tickerBound ? (
         <button
           className="pp-btn pp-btn--ghost"
           type="button"
@@ -279,7 +339,7 @@ export function Editor() {
         </button>
         ) : null}
       </div>
-      {hasPublishedVersion(publishedVersionId) ? <p className="muted">{EDITOR_PUBLISHED_NOTE}</p> : null}
+      {tickerBound || !hasPublishedVersion(publishedVersionId) ? null : <p className="muted">{EDITOR_PUBLISHED_NOTE}</p>}
       {saveError ? (
         <p className="error" role="alert">
           {saveError}
@@ -331,6 +391,8 @@ export function Editor() {
       ) : null}
       <div className="editor">
         <div className="editor-stage">
+          {tickerBound ? null : (
+            <>
           <label htmlFor="editor-title">Content name</label>
           <input
             id="editor-title"
@@ -343,12 +405,14 @@ export function Editor() {
               setMsg("");
             }}
           />
-          <label htmlFor="editor-ticker">Display profile</label>
+            </>
+          )}
+          <label htmlFor="editor-ticker">{tickerBound ? "Ticker" : "Display profile"}</label>
           <select
             id="editor-ticker"
             className="pp-input"
             value={tickerId}
-            disabled={!canWriteContent}
+            disabled={tickerBound || !canWriteContent}
             onChange={(event) => {
               const nextId = event.target.value;
               setTickerId(nextId);
@@ -364,11 +428,11 @@ export function Editor() {
               </option>
             ))}
           </select>
-          <div className="led-wrap editor-preview">
+          <div className="editor-preview">
             {doc.layers.length === 0 ? <p className="muted editor-empty">{EDITOR_EMPTY_MESSAGE}</p> : null}
-            <LedPreview document={doc} resources={resources} label={EDITOR_PREVIEW_LABEL} />
+            <TickerDisplay document={doc} resources={resources} label={EDITOR_PREVIEW_LABEL} scale="large" />
           </div>
-          {headVersionId ? <p className="muted">Draft version {headVersionId}</p> : null}
+          {tickerBound || !headVersionId ? null : <p className="muted">Draft version {headVersionId}</p>}
         </div>
         <div className="card editor-panel">
           <h2>Layers</h2>

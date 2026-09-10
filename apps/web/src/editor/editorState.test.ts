@@ -39,6 +39,8 @@ import {
   publishedVersionUntouched,
   resolveEditorProfile,
   saveDraftBody,
+  tickerEditorBackHref,
+  contentEditorBackHref,
 } from "./editorState.js";
 
 const lobbyProfile = { width: 128, height: 16, colorMode: "full" as const };
@@ -182,6 +184,8 @@ describe("save and dirty state", () => {
     expect(editorPublishMessage()).toBe(EDITOR_PUBLISH_SUCCESS);
     expect(editorPublishMessage({ selectedTickerId: null, deliveries: 0 })).toBe("Content published.");
     expect(editorPublishMessage({ selectedTickerId: null, deliveries: 0 })).not.toMatch(/assigned ticker/i);
+    expect(tickerEditorBackHref()).toBe("/tickers");
+    expect(contentEditorBackHref("cnt_1")).toBe("/content/cnt_1");
   });
 });
 

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "./api";
+import { TickerDisplay } from "./components/TickerDisplay";
+import { asCompositionDocument } from "./components/ledPresentation";
 import {
   CONTENT_DETAIL_DESCRIPTION,
   contentDetailPageState,
@@ -92,6 +94,17 @@ export function ContentDetail() {
           Open editor
         </Link>
       </p>
+      <section className="dash-now" aria-labelledby="content-preview-heading">
+        <div className="row dash-now-head">
+          <h2 id="content-preview-heading">Preview</h2>
+        </div>
+        <TickerDisplay
+          document={asCompositionDocument(row?.document)}
+          scale="large"
+          label={view.name}
+          emptyMessage="No draft composition is available for this content."
+        />
+      </section>
       <section className="content-versions" aria-labelledby="content-versions-heading">
         <h2 id="content-versions-heading">Versions</h2>
         {view.versions.length === 0 ? (

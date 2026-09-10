@@ -104,9 +104,11 @@ describe("player architecture", () => {
     expect(src).not.toContain("createDemoDocument");
   });
 
-  it("uses shared renderFrame", () => {
-    expect(src).toContain("renderFrame");
-    expect(src).toContain('@ticker-cms/composition');
+  it("uses shared renderFrame through TickerDisplay", () => {
+    expect(src).toContain("TickerDisplay");
+    const display = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../web/src/components/TickerDisplay.tsx"), "utf8");
+    expect(display).toContain("renderFrame");
+    expect(display).toContain('@ticker-cms/composition');
   });
 
   it("builds static assets under /player/ and still requests origin-root /v1 playback", () => {

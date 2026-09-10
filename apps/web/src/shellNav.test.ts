@@ -1,17 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { ASSISTANT_DEFAULT_OPEN, CUSTOMER_NAV, customerHeader, navItemCurrent } from "./shellNav.js";
+import { tickerDesignHref } from "./tickerData.js";
+import { ASSISTANT_DEFAULT_OPEN, CUSTOMER_NAV, customerHeader, customerLegacyRedirect, navItemCurrent } from "./shellNav.js";
 
 describe("customer shell navigation", () => {
   it("keeps working routes ahead of unavailable capabilities", () => {
     const groups = CUSTOMER_NAV.map((item) => item.group);
-    expect(groups.slice(0, 10)).toEqual([
+    expect(groups.slice(0, 8)).toEqual([
       "Workspace",
       "Workspace",
       "Workspace",
       "Workspace",
       "Workspace",
-      "Workspace",
-      "Publishing",
       "Team",
       "Account",
       "Account",
@@ -30,16 +29,39 @@ describe("customer shell navigation", () => {
     expect(CUSTOMER_NAV.some((item) => item.label === "Displays")).toBe(false);
   });
 
-  it("marks nested editor and ticker pages as their parent section", () => {
-    const content = CUSTOMER_NAV.find((item) => item.id === "content")!;
+  it("removes Content and Campaigns from customer navigation", () => {
+    expect(CUSTOMER_NAV.some((item) => item.label === "Content" || item.to === "/content" || item.id === "content")).toBe(
+      false,
+    );
+    expect(
+      CUSTOMER_NAV.some((item) => item.label === "Campaigns" || item.to === "/campaigns" || item.id === "campaigns"),
+    ).toBe(false);
+    expect(CUSTOMER_NAV.find((item) => item.id === "tickers")).toMatchObject({ label: "My Tickers", to: "/tickers" });
+  });
+
+  it("keeps My Tickers and Design Your Ticker reachable", () => {
+    expect(CUSTOMER_NAV.some((item) => item.to === "/tickers")).toBe(true);
+    expect(tickerDesignHref("tkr_1")).toBe("/tickers/tkr_1/design");
+    expect(navItemCurrent(CUSTOMER_NAV.find((item) => item.id === "tickers")!, "/tickers/tkr_1/design")).toBe(true);
+  });
+
+  it("redirects old content and campaign pages to My Tickers", () => {
+    expect(customerLegacyRedirect("/content")).toBe("/tickers");
+    expect(customerLegacyRedirect("/content/cnt_1")).toBe("/tickers");
+    expect(customerLegacyRedirect("/content/cnt_1/edit")).toBe("/tickers");
+    expect(customerLegacyRedirect("/campaigns")).toBe("/tickers");
+    expect(customerLegacyRedirect("/campaigns/cmp_1")).toBe("/tickers");
+    expect(customerLegacyRedirect("/tickers")).toBeNull();
+    expect(customerLegacyRedirect("/tickers/tkr_1/design")).toBeNull();
+    expect(customerLegacyRedirect("/")).toBeNull();
+  });
+
+  it("marks nested ticker pages as their parent section", () => {
     const tickers = CUSTOMER_NAV.find((item) => item.id === "tickers")!;
     const account = CUSTOMER_NAV.find((item) => item.id === "account")!;
     const subscription = CUSTOMER_NAV.find((item) => item.id === "subscription")!;
-    expect(navItemCurrent(content, "/content/cnt_1")).toBe(true);
-    expect(navItemCurrent(content, "/content/cnt_1/edit")).toBe(true);
     expect(navItemCurrent(tickers, "/tickers/tkr_1")).toBe(true);
-    const campaigns = CUSTOMER_NAV.find((item) => item.id === "campaigns")!;
-    expect(navItemCurrent(campaigns, "/campaigns/cmp_1")).toBe(true);
+    expect(navItemCurrent(tickers, "/tickers/tkr_1/design")).toBe(true);
     const assets = CUSTOMER_NAV.find((item) => item.id === "assets")!;
     expect(navItemCurrent(assets, "/assets/ast_1")).toBe(true);
     expect(navItemCurrent(account, "/account/subscription")).toBe(false);
@@ -50,11 +72,19 @@ describe("customer shell navigation", () => {
     expect(customerHeader("/", "Demo Venue")).toEqual({ title: "Demo Venue" });
     expect(customerHeader("/tickers", "Demo Venue").meta).toBeUndefined();
     expect(customerHeader("/tickers/tkr_1", "Demo Venue")).toEqual({ title: "Demo Venue", meta: "My Tickers" });
-    expect(customerHeader("/content/cnt_1", "Demo Venue")).toEqual({ title: "Demo Venue", meta: "Content" });
-    expect(customerHeader("/content/cnt_1/edit", "Demo Venue")).toEqual({ title: "Demo Venue", meta: "Content" });
-    expect(customerHeader("/campaigns/cmp_1", "Demo Venue")).toEqual({ title: "Demo Venue", meta: "Campaigns" });
+    expect(customerHeader("/tickers/tkr_1/design", "Demo Venue")).toEqual({ title: "Demo Venue", meta: "My Tickers" });
+    expect(customerHeader("/content/cnt_1", "Demo Venue")).toEqual({ title: "Demo Venue" });
+    expect(customerHeader("/campaigns/cmp_1", "Demo Venue")).toEqual({ title: "Demo Venue" });
     expect(customerHeader("/assets/ast_1", "Demo Venue")).toEqual({ title: "Demo Venue", meta: "Assets" });
     expect(customerHeader("/schedules", null)).toEqual({ title: "Workspace" });
+  });
+
+  it("does not add Stimulate to customer portal navigation", () => {
+    expect(CUSTOMER_NAV.some((item) => item.to === "/stimulate" || /stimulate/i.test(item.label))).toBe(false);
+  });
+
+  it("does not add the ticker designer demo to customer portal navigation", () => {
+    expect(CUSTOMER_NAV.some((item) => item.to === "/ticker-designer-demo")).toBe(false);
   });
 
   it("keeps the assistant closed by default", () => {

@@ -155,6 +155,7 @@ describe("renderFrame", () => {
     renderFrame(doc, ctx, 0);
     expect(ops).toEqual(["clear", "fill", "text"]);
     expect(raw.imageSmoothingEnabled).toBe(false);
+    expect(raw.font).toContain("Segoe UI Emoji");
     expect(fills[0]).toMatchObject({ x: 0, y: 0, w: 993, h: 32, color: "#050705" });
     expect(texts[0]?.text).toBe("Hello");
   });

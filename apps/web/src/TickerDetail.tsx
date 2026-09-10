@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { COLOR_MODES, type ColorMode, type CompositionDocument } from "@ticker-cms/composition";
+import { COLOR_MODES, type ColorMode } from "@ticker-cms/composition";
 import { api, ApiError } from "./api";
+import { TickerDisplay } from "./components/TickerDisplay";
+import { asCompositionDocument } from "./components/ledPresentation";
 import { useCustomerAccess } from "./CustomerRole";
-import { LedPreview } from "./LedPreview";
 import {
   TICKER_DETAIL_DESCRIPTION,
   TICKER_FORM_DEFAULTS,
@@ -11,6 +12,7 @@ import {
   TICKER_SAVE_SUCCESS,
   colorModeLabel,
   isPlaybackUnavailableError,
+  tickerDesignHref,
   tickerDetailPageState,
   tickerPatchBody,
   tickerSubmitLabel,
@@ -147,6 +149,11 @@ export function TickerDetail() {
       </p>
       <h1>{view.name}</h1>
       <p className="muted page-lead">{TICKER_DETAIL_DESCRIPTION}</p>
+      <p>
+        <Link className="pp-btn pp-btn--primary" to={tickerDesignHref(view.id)}>
+          Design Your Ticker
+        </Link>
+      </p>
       {view.location ? <p className="muted ticker-location">Location: {view.location}</p> : null}
       <dl className="spec-block">
         <div>
@@ -164,7 +171,7 @@ export function TickerDetail() {
           </dd>
         </div>
         <div>
-          <dt>Current content</dt>
+          <dt>Now playing</dt>
           <dd>{view.contentLabel}</dd>
         </div>
       </dl>
@@ -251,16 +258,18 @@ export function TickerDetail() {
         </button>
       </form>
       ) : null}
-      <section className="led-wrap dash-now" aria-labelledby="ticker-preview-heading">
+      <section className="dash-now" aria-labelledby="ticker-preview-heading">
         <div className="row dash-now-head">
           <h2 id="ticker-preview-heading">Preview</h2>
           <span className="muted">{view.contentLabel}</span>
         </div>
-        {view.previewEmpty ? (
-          <p className="led-empty">{view.previewMessage}</p>
-        ) : (
-          <LedPreview document={view.document as CompositionDocument} />
-        )}
+        <TickerDisplay
+          document={asCompositionDocument(view.document)}
+          profile={{ width, height, colorMode }}
+          scale="large"
+          label={view.name}
+          emptyMessage={view.previewMessage}
+        />
       </section>
     </>
   );

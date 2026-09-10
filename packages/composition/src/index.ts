@@ -65,6 +65,9 @@ export type CompositionDocument = {
   layers: Layer[];
 };
 
+export const LED_TEXT_FONT_STACK =
+  '"IBM Plex Mono", ui-monospace, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+
 export function snapToLed(value: number): number {
   return Math.round(value);
 }
@@ -152,7 +155,7 @@ export function renderFrame(
     }
     if (layer.type === "text") {
       const fontPx = layer.props.fontPx ?? Math.max(10, layer.height ?? height - 8);
-      ctx.font = `bold ${fontPx}px "IBM Plex Mono", ui-monospace, monospace`;
+      ctx.font = `bold ${fontPx}px ${LED_TEXT_FONT_STACK}`;
       ctx.fillStyle = layer.props.color;
       ctx.textBaseline = "middle";
       const text = layer.props.text;

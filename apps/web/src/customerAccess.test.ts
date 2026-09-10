@@ -58,4 +58,12 @@ describe("customer mutation visibility", () => {
     expect(admin.canInviteUsers).toBe(true);
     expect(canSimulateSubscription(ADMIN)).toBe(false);
   });
+
+  it("lets content managers save, publish, and schedule", () => {
+    const manager = customerAccess("content_manager");
+    expect(manager.canWriteContent).toBe(true);
+    expect(manager.canPublish).toBe(true);
+    expect(manager.canManageCampaigns).toBe(true);
+    expect(manager.canManageTickers).toBe(false);
+  });
 });

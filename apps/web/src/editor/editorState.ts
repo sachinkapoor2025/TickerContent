@@ -161,6 +161,10 @@ export function contentEditorBackHref(id: string) {
   return `/content/${id}`;
 }
 
+export function tickerEditorBackHref() {
+  return "/tickers";
+}
+
 export function layerGeometryValue(layer: Layer, key: "x" | "y" | "width" | "height", fallback: number): number {
   const value = layer[key];
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;

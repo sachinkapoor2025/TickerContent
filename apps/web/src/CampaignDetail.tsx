@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "./api";
+import { TickerDisplay } from "./components/TickerDisplay";
+import { asCompositionDocument } from "./components/ledPresentation";
 import { useCustomerAccess } from "./CustomerRole";
 import {
   CAMPAIGN_DETAIL_DESCRIPTION,
@@ -197,6 +199,7 @@ export function CampaignDetail() {
 
   const { view, catalog } = page;
   const selectedContent = catalog.contents.find((item) => item.id === contentId);
+  const selectedRecord = contents?.find((item) => item.id === contentId);
   const unpublishedWarning = unpublishedContentWarning(selectedContent);
   const publishedAlert = unpublishedWarning || fieldErrors.published;
 
@@ -209,6 +212,18 @@ export function CampaignDetail() {
       </p>
       <h1>{view.name}</h1>
       <p className="muted page-lead">{CAMPAIGN_DETAIL_DESCRIPTION}</p>
+      <section className="dash-now" aria-labelledby="campaign-preview-heading">
+        <div className="row dash-now-head">
+          <h2 id="campaign-preview-heading">Preview</h2>
+          <span className="muted">{view.contentTitle}</span>
+        </div>
+        <TickerDisplay
+          document={asCompositionDocument(selectedRecord?.document)}
+          scale="large"
+          label={view.contentTitle}
+          emptyMessage="Open the linked content in the editor to preview this campaign on the LED ticker."
+        />
+      </section>
       <dl className="spec-block">
         <div>
           <dt>Status</dt>

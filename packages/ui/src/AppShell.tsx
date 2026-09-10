@@ -29,7 +29,8 @@ type AppShellProps = {
   headerTitle: string;
   headerMeta?: string;
   navItems: ShellNavItem[];
-  onLogout: () => void;
+  onLogout?: () => void;
+  showLogout?: boolean;
   onNavSelect?: (item: ShellNavItem) => void;
   linkComponent?: ComponentType<ShellLinkProps>;
   children: ReactNode;
@@ -53,6 +54,7 @@ export function AppShell({
   headerMeta,
   navItems,
   onLogout,
+  showLogout = true,
   onNavSelect,
   linkComponent: Link,
   children,
@@ -173,9 +175,11 @@ export function AppShell({
           </div>
         </div>
         <div className="pp-header__right">
-          <button type="button" className="pp-btn pp-btn--ghost" onClick={onLogout}>
-            Logout
-          </button>
+          {showLogout && onLogout ? (
+            <button type="button" className="pp-btn pp-btn--ghost" onClick={onLogout}>
+              Logout
+            </button>
+          ) : null}
         </div>
       </header>
       <main id="pp-main" className="pp-main" tabIndex={-1}>
