@@ -1,6 +1,7 @@
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   DeleteObjectCommand,
@@ -88,13 +89,17 @@ describe("S3 asset keys", () => {
 
 describe("S3 asset storage", () => {
   it("is constructed from env without hardcoded credentials", () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "asset-storage.ts"), "utf8");
+    expect(source).toContain("new S3Client({})");
+    expect(source).not.toMatch(/accessKeyId\s*:/);
+    expect(source).not.toMatch(/secretAccessKey\s*:/);
+    expect(source.includes("AKIA")).toBe(false);
+
     const storage = createAssetStorageFromEnv({
       ASSET_STORAGE: "s3",
       ASSET_BUCKET: "ticker-cms-assets-test",
     });
     expect(storage).toBeTruthy();
-    expect(process.env.AWS_ACCESS_KEY_ID).toBeUndefined();
-    expect(process.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
   });
 
   it("fails clearly when S3 mode has no bucket", () => {
